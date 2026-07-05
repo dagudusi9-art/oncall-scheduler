@@ -1,0 +1,20 @@
+year: 2026
+month: 8
+
+members:
+  - name: 大谷
+    target_count: 4
+  - name: 中島
+    target_count: 8
+  - name: 龍
+    target_count: 6
+  - name: 藤井
+    target_count: 8
+  - name: 健
+    target_count: 6
+  - name: 若山
+    target_count: 6
+  - name: 菊池
+    target_count: 6
+  - name: 大滝
+    target_count: 6
