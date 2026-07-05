@@ -198,61 +198,8 @@ def inject_mobile_css() -> None:
         }
 
 
-        /* Streamlitネイティブボタン式カレンダー: スマホでも7列固定 */
-        .native-cal-weekday {
-            text-align: center;
-            font-weight: 800;
-            color: #4b5563;
-            padding: 0.15rem 0;
-            font-size: 0.95rem;
-        }
-        .native-cal-empty {
-            height: 3.35rem;
-            border: 1px solid #e5e7eb;
-            border-radius: 0.75rem;
-            background: #f8fafc;
-            opacity: 0.55;
-        }
-
-        /* カレンダーボタン共通: 文字が変わってもセルの大きさを固定 */
-        div.stButton > button {
-            white-space: pre-line !important;
-            line-height: 1.02 !important;
-            height: 3.35rem !important;
-            min-height: 3.35rem !important;
-            max-height: 3.35rem !important;
-            padding: 0.10rem 0.02rem !important;
-            border-radius: 0.75rem !important;
-            border: 1px solid #cfd6e4 !important;
-            color: #1f2937 !important;
-            font-weight: 800 !important;
-            box-shadow: none !important;
-            overflow: hidden !important;
-        }
-        div.stButton > button p {
-            margin: 0 !important;
-            line-height: 1.02 !important;
-        }
-
-        /* 状態別カラー。Streamlitのボタンlabelがaria-labelに入る環境で効く */
-        div.stButton > button[aria-label*="×終"] {
-            background: #f7c6c7 !important;
-            border-color: #ee9ca0 !important;
-        }
-        div.stButton > button[aria-label*="▲昼"] {
-            background: #ffe8ac !important;
-            border-color: #f6ce70 !important;
-        }
-        div.stButton > button[aria-label*="▲夜"] {
-            background: #c9dff6 !important;
-            border-color: #9cc2ea !important;
-        }
-        div.stButton > button[aria-label*="○"] {
-            background: #d9f2dc !important;
-            border-color: #aedfb5 !important;
-        }
-        div.stButton > button:hover {
-            filter: brightness(0.97);
+        /* 週末(土・日)セルの強調(背景色は状態ごとの色を優先し、枠線のみ変える) */
+        .mobile-calendar-weekend {
             border-color: #94a3b8 !important;
         }
 
@@ -274,25 +221,6 @@ def inject_mobile_css() -> None:
                 min-width: 0 !important;
                 width: 14.2857% !important;
                 flex: 1 1 0 !important;
-            }
-            div.stButton > button {
-                min-width: 0 !important;
-                width: 100% !important;
-                height: 3.05rem !important;
-                min-height: 3.05rem !important;
-                max-height: 3.05rem !important;
-                padding: 0.06rem 0 !important;
-                font-size: 0.76rem !important;
-                border-radius: 0.62rem !important;
-            }
-            .native-cal-weekday {
-                font-size: 0.82rem;
-            }
-            .native-cal-empty {
-                height: 3.05rem;
-                min-height: 3.05rem;
-                max-height: 3.05rem;
-                border-radius: 0.62rem;
             }
         }
 

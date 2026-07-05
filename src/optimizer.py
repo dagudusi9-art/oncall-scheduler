@@ -16,13 +16,19 @@ OR-Tools CP-SAT による勤務表最適化エンジン
   A. 自院オンコールの年間実績(actual_assignments)を均等化 ← 最優先
   B. その月の自院オンコール目標回数からのズレを最小化
   C. 日中/夜間の担当回数の偏りを最小化 (個人ごと)
-  D. 夜間→翌日日中のような連続勤務を避ける
+  D. 夜間→翌日日中のような連続勤務を避ける(強めに設定)
   E. 月内での勤務日の偏り(集中)を避ける
   F. 土日・祝日担当回数の偏りを最小化
   G. 外部バイトの回数を対象者間でなるべく均等にする(義務ではないため優先度は低い)
+  H. 土曜・日曜のオンコールは同じ週末にまとめる(分断を避ける)
+     例: 今週は土曜のみ、別の週は日曜のみ、のように週末を2回消費するより、
+     同じ週の土曜・日曜にまとめて1週末で済ませる方を優先する。
+     ただし絶対条件ではなく、不可日や公平性(A・B)、連続勤務回避(D)より優先度は低い。
 
 自院オンコールは義務勤務であるのに対し、外部病院バイトは義務ではないため、
 外部バイトの均等化は他の条件よりも優先度を下げている。
+週末ペア化(H)は「できれば」の副目的であり、公平性(A・B)や連続勤務回避(D)と
+衝突する場合はそちらを優先する。
 
 各ソフト制約には重み(weight)を持たせ、重要度に応じて調整できるようにしている。
 """
@@ -47,8 +53,9 @@ class OptimizerWeights:
 
     annual_actual_balance: int = 300  # 自院オンコールの年間実績均等化(最優先)
     target_count_deviation: int = 50
+    consecutive_shift: int = 30  # 夜間→翌日日中の連続勤務を避ける(強め。週末ペア化より優先)
+    weekend_pairing: int = 20  # 土日オンコールを同じ週末にまとめる(できれば/公平性・連続勤務回避より低優先)
     day_night_balance: int = 15
-    consecutive_shift: int = 12
     spread_clustering: int = 5
     weekend_holiday_balance: int = 8
     gaikobu_balance: int = 6  # 外部バイト回数を対象者間で均等にする重み(義務ではないため低め)
@@ -119,6 +126,22 @@ class OnCallOptimizer:
 
     def _is_weekend_or_holiday(self, d: date) -> bool:
         return d.weekday() >= 5 or d in self.options.holidays
+
+    def _weekend_pairs(self) -> List[Tuple[date, date]]:
+        """
+        月内で連続する(土曜, 日曜)のペアを返す。
+        月初が日曜だけ(前月の土曜と対)や月末が土曜だけ(翌月の日曜と対)の場合は、
+        月をまたぐペアは扱えないため対象外とする(単発の週末端として通常の
+        土日偏り制約(ソフトF)の対象にはなるが、ペア化の対象にはならない)。
+        """
+        day_set = set(self.days)
+        pairs: List[Tuple[date, date]] = []
+        for d in self.days:
+            if d.weekday() == 5:  # 土曜
+                nxt = d + timedelta(days=1)
+                if nxt in day_set and nxt.weekday() == 6:
+                    pairs.append((d, nxt))
+        return pairs
 
     def _is_unavailable(self, member: str, day: date, slot: Slot) -> bool:
         u = self.unavail_map.get((member, day))
@@ -276,6 +299,25 @@ class OnCallOptimizer:
                         both, [assigned_on_day[(d, name)], assigned_on_day[(nd, name)]]
                     )
                     penalty_terms.append(both * w.spread_clustering)
+
+        # --- ソフトH: 土曜・日曜のオンコールは同じ週末にまとめる(分断を避ける) ---
+        # 「土曜だけ」「日曜だけ」に割り当てられた(=分断)場合にペナルティを与え、
+        # 同じ人が同じ週末の土曜・日曜の両方(または両方とも入らない)に
+        # なるべく揃うようにする。絶対条件ではないため、不可日や公平性(A・B)、
+        # 連続勤務回避(D)と衝突する場合はそちらが優先される。
+        weekend_pairs = self._weekend_pairs()
+        for sat, sun in weekend_pairs:
+            for name in self.member_names:
+                a = assigned_on_day[(sat, name)]
+                b = assigned_on_day[(sun, name)]
+                split = model.NewBoolVar(f"weekend_split_{sat.isoformat()}_{name}")
+                # split は a と b のXOR(=土日どちらか一方のみに割当)と等価になるよう
+                # 線形制約で挟み込む(a=b=0→0, a=b=1→0, a≠b→1)
+                model.Add(split >= a - b)
+                model.Add(split >= b - a)
+                model.Add(split <= a + b)
+                model.Add(split <= 2 - a - b)
+                penalty_terms.append(split * w.weekend_pairing)
 
         # --- ソフトF: 土日・祝日の偏りを最小化 ---
         weekend_days = [d for d in self.days if self._is_weekend_or_holiday(d)]

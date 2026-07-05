@@ -195,6 +195,76 @@ def test_month_weeks_starts_on_sunday():
     assert second_week[0].weekday() == 6  # 日曜
 
 
+def test_weekend_pairs_detects_same_weekend_saturday_sunday():
+    """_weekend_pairs() が月内の連続する(土曜,日曜)を正しく検出すること
+    (2026年8月は8/1が土曜始まりのため、8/1-8/2, 8/8-8/9, ... が対になる)"""
+    members = [Member(name=n, target_count=8) for n in ["A", "B", "C"]]
+    optimizer = OnCallOptimizer(
+        year=2026, month=8, members=members, unavailabilities=[],
+        options=OptimizerOptions(max_time_seconds=5),
+    )
+    pairs = optimizer._weekend_pairs()
+    assert (date(2026, 8, 1), date(2026, 8, 2)) in pairs
+    assert (date(2026, 8, 8), date(2026, 8, 9)) in pairs
+    # 月末(8/29が土曜)は8/30が日曜として月内に存在するのでペアになる
+    assert (date(2026, 8, 29), date(2026, 8, 30)) in pairs
+
+
+def test_weekend_pairing_reduces_split_weekends():
+    """週末ペア化(ソフトH)により、同じ人の土日オンコールが同じ週末に
+    まとまりやすくなること(ペア化なし相当の重み0との比較で分断が減ること)"""
+    from src.optimizer import OptimizerWeights
+
+    members = [Member(name=n, target_count=8) for n in ["A", "B", "C", "D"]]
+
+    def _count_splits(weight: int) -> int:
+        weights = OptimizerWeights(weekend_pairing=weight)
+        optimizer = OnCallOptimizer(
+            year=2026, month=8, members=members, unavailabilities=[],
+            options=OptimizerOptions(max_time_seconds=20, weights=weights),
+        )
+        result = optimizer.solve()
+        assert result.status in ("OPTIMAL", "FEASIBLE")
+        by_day = {e.day: e for e in result.entries}
+        splits = 0
+        for sat, sun in optimizer._weekend_pairs():
+            sat_names = {n for n in [by_day[sat].assignments[Slot.DAY], by_day[sat].assignments[Slot.NIGHT]] if n}
+            sun_names = {n for n in [by_day[sun].assignments[Slot.DAY], by_day[sun].assignments[Slot.NIGHT]] if n}
+            for name in sat_names ^ sun_names:  # 片方だけに現れる人=分断
+                if (name in sat_names) != (name in sun_names):
+                    splits += 1
+        return splits
+
+    splits_without_pairing = _count_splits(weight=0)
+    splits_with_pairing = _count_splits(weight=20)
+    assert splits_with_pairing <= splits_without_pairing
+
+
+def test_consecutive_shift_still_avoided_with_weekend_pairing():
+    """週末ペア化を有効にした状態でも、夜間→翌日日中の連続勤務は
+    避けられる(または大きく減る)こと"""
+    members = [Member(name=n, target_count=8) for n in ["A", "B", "C", "D", "E"]]
+    optimizer = OnCallOptimizer(
+        year=2026, month=8, members=members, unavailabilities=[],
+        options=OptimizerOptions(max_time_seconds=20),
+    )
+    result = optimizer.solve()
+    assert result.status in ("OPTIMAL", "FEASIBLE")
+
+    by_day = {e.day: e for e in result.entries}
+    days = sorted(by_day.keys())
+    consecutive_count = 0
+    for i in range(len(days) - 1):
+        today, tomorrow = days[i], days[i + 1]
+        night_today = by_day[today].assignments[Slot.NIGHT]
+        day_tomorrow = by_day[tomorrow].assignments[Slot.DAY]
+        if night_today is not None and night_today == day_tomorrow:
+            consecutive_count += 1
+    # 絶対条件ではないため0件を厳密には保証できないが、
+    # 重み付けにより発生件数はごく少数に抑えられるはず
+    assert consecutive_count <= 2
+
+
 if __name__ == "__main__":
     test_basic_feasible_schedule()
     test_unavailability_is_respected()
@@ -205,4 +275,7 @@ if __name__ == "__main__":
     test_gaikobu_stats_totals()
     test_annual_actual_balance_favors_deficit_member()
     test_month_weeks_starts_on_sunday()
+    test_weekend_pairs_detects_same_weekend_saturday_sunday()
+    test_weekend_pairing_reduces_split_weekends()
+    test_consecutive_shift_still_avoided_with_weekend_pairing()
     print("全テスト成功")

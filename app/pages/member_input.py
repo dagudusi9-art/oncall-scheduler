@@ -108,9 +108,7 @@ st.markdown("".join(legend_html), unsafe_allow_html=True)
 
 weeks = uc.month_weeks(year, month)
 
-# Streamlitのネイティブボタンで描画する。
-# ボタン内の文字量が状態ごとに変わるとセルの高さが揺れるため、
-# 表示は「日付 + 色付き短縮記号」だけに固定する。
+# 状態ごとの短縮表示(ボックスの大きさが変わらないよう、常に2文字程度に固定)
 STATE_SHORT_LABEL = {
     ds.STATE_OK: "○",
     ds.STATE_FULL_OFF: "×終",
@@ -118,29 +116,36 @@ STATE_SHORT_LABEL = {
     ds.STATE_NIGHT_OFF: "▲夜",
 }
 
-weekday_cols = st.columns(7, gap="small")
-for col, wd in zip(weekday_cols, uc.WEEKDAY_JA):
-    col.markdown(f"<div class='native-cal-weekday'>{html.escape(wd)}</div>", unsafe_allow_html=True)
+# admin.py の外部バイト日カレンダーと同じ「HTML/CSSグリッド + <a>リンク」方式。
+# st.columns/st.buttonに依存しないため、スマホでの崩れ・クリック不安定・
+# 色付け(旧: aria-labelの文字列マッチ)が一切不要になり、確実に動作する。
+# クリック(タップ)は ?token=...&set_day=YYYY-MM-DD へのリンク遷移で、
+# ページ先頭のハンドラが状態を切り替えて即座に通常URLへ戻す。
+cal_html = ["<div class='mobile-calendar' aria-label='不都合日カレンダー'>"]
+for wd in uc.WEEKDAY_JA:
+    cal_html.append(f"<div class='mobile-calendar-weekday'>{html.escape(wd)}</div>")
 
-for week_index, week in enumerate(weeks):
-    cols = st.columns(7, gap="small")
-    for col_index, d in enumerate(week):
-        with cols[col_index]:
-            if d is None:
-                st.markdown("<div class='native-cal-empty'>&nbsp;</div>", unsafe_allow_html=True)
-                continue
-
-            day_str = d.isoformat()
-            state = ds.get_member_day_state(year, month, selected, day_str)
-            label = f"{d.day}\n{STATE_SHORT_LABEL[state]}"
-            if st.button(
-                label,
-                key=f"cal_{selected}_{year}_{month}_{day_str}",
-                use_container_width=True,
-                help=f"{d.day}日: {ds.STATE_LABEL[state]}",
-            ):
-                ds.cycle_member_day_state(year, month, selected, day_str)
-                st.rerun()
+for week in weeks:
+    for d in week:
+        if d is None:
+            cal_html.append("<div class='mobile-calendar-empty' aria-hidden='true'></div>")
+            continue
+        day_str = d.isoformat()
+        state = ds.get_member_day_state(year, month, selected, day_str)
+        color = ds.STATE_COLOR[state]
+        short = STATE_SHORT_LABEL[state]
+        weekend_cls = " mobile-calendar-weekend" if uc.is_weekend(d) else ""
+        query = urlencode({"token": token, "set_day": day_str})
+        cal_html.append(
+            f"<a class='mobile-calendar-cell{weekend_cls}' href='?{query}' "
+            f"style='background-color:{color};' "
+            f"aria-label='{d.day}日 {html.escape(ds.STATE_LABEL[state])}'>"
+            f"<span><span class='mobile-calendar-day'>{d.day}</span>"
+            f"<span class='mobile-calendar-state'>{html.escape(short)}</span></span>"
+            "</a>"
+        )
+cal_html.append("</div>")
+st.markdown("".join(cal_html), unsafe_allow_html=True)
 
 st.caption("色で状態を判別できます。表示: ○=終日OK、×終=終日不可、▲昼=日中不可、▲夜=夜間不可")
 
