@@ -11,8 +11,6 @@ import hashlib
 from datetime import date
 from typing import List, Optional
 
-import streamlit as st
-
 # カレンダーグリッドのヘッダー表示用(日曜始まり)。
 # WEEKDAY_JA[0]が週の最初の列(日曜)に対応する。
 # 注意: これは表示順のリストであり、Python の date.weekday()(月曜=0)を
@@ -67,55 +65,3 @@ def member_color(name: str) -> str:
 
 def is_weekend(d: date) -> bool:
     return d.weekday() >= 5
-
-
-def render_schedule_calendar(entries: list, year: int, month: int) -> None:
-    """
-    勤務表(予定/実績どちらでも可)をGoogleカレンダー風に表示する、閲覧専用の共通コンポーネント。
-
-    entries: [{"date": "YYYY-MM-DD", "day": 名前 or None, "night": 名前 or None, "gaikobu": 名前 or None}, ...]
-
-    表示は st.markdown による静的HTMLのみで構成されているため、クリックや編集は一切できない
-    (ボタン等のインタラクティブ要素を含まない)。管理者画面・メンバー画面のどちらから呼んでも
-    見た目・配色が完全に一致するよう、この関数だけを両画面で共有すること
-    (画面ごとに描画コードをコピーしないこと。修正はここ1か所で済む)。
-    """
-    by_day = {e["date"]: e for e in entries}
-    weeks = month_weeks(year, month)
-
-    header_cols = st.columns(7)
-    for col, wd in zip(header_cols, WEEKDAY_JA):
-        col.markdown(f"<div style='text-align:center;font-weight:bold'>{wd}</div>", unsafe_allow_html=True)
-
-    for week in weeks:
-        row_cols = st.columns(7)
-        for col, d in zip(row_cols, week):
-            with col:
-                if d is None:
-                    st.write("")
-                    continue
-                e = by_day.get(d.isoformat(), {})
-                day_name = e.get("day") or "-"
-                night_name = e.get("night") or "-"
-                gaikobu_name = e.get("gaikobu")
-                day_color = member_color(day_name) if day_name != "-" else "#EEEEEE"
-                night_color = member_color(night_name) if night_name != "-" else "#EEEEEE"
-                weekend_marker = " (土日)" if is_weekend(d) else ""
-                gaikobu_html = ""
-                if gaikobu_name:
-                    gaikobu_color = member_color(gaikobu_name)
-                    gaikobu_html = (
-                        f"<div style='background-color:{gaikobu_color};border-radius:4px;padding:2px;"
-                        f"font-size:0.8em;text-align:center'>🚑{gaikobu_name}</div>"
-                    )
-                st.markdown(
-                    f"""
-                    <div style='border:1px solid #ddd;border-radius:6px;padding:4px;margin-bottom:4px;'>
-                      <div style='font-size:0.75em;color:#555'>{d.day}{weekend_marker}</div>
-                      <div style='background-color:{day_color};border-radius:4px;padding:2px;margin:2px 0;font-size:0.8em;text-align:center'>☀️{day_name}</div>
-                      <div style='background-color:{night_color};border-radius:4px;padding:2px;font-size:0.8em;text-align:center'>🌙{night_name}</div>
-                      {gaikobu_html}
-                    </div>
-                    """,
-                    unsafe_allow_html=True,
-                )

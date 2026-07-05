@@ -338,40 +338,12 @@ else:
 st.divider()
 
 # ======================================================================
-=======
-# 全体勤務表(閲覧のみ) - 管理者画面と同じ描画ロジック(uc.render_schedule_calendar)を
-# 共有しているため、見た目・配色は完全に一致する。編集用のウィジェットは
-# 一切含まれておらず、クリックしても何も起きない(閲覧専用)。
-# ======================================================================
-st.header("📅 全体勤務表(閲覧のみ)")
-st.caption(
-    "その日の日中・夜間・外部バイトの担当者を確認できます(編集はできません)。"
-    "管理者が「下書き」を作成した時点で表示され、確定前でも見られます。"
-    "他のメンバーの不都合日入力の内容はここでは表示されません。"
-)
-
-scheduled_snapshot = ds.load_schedule_snapshot(year, month)
-actual_snapshot = ds.load_actual_snapshot(year, month)
-
-overview_tab_sched, overview_tab_actual = st.tabs(["予定", "実績"])
-with overview_tab_sched:
-    if scheduled_snapshot:
-        uc.render_schedule_calendar(scheduled_snapshot["entries"], year, month)
-    else:
-        st.caption("この月の勤務表はまだ作成されていません(管理者が作成すると表示されます)。")
-with overview_tab_actual:
-    if actual_snapshot:
-        uc.render_schedule_calendar(actual_snapshot["entries"], year, month)
-    else:
-        st.caption("実績は、勤務表が確定されると表示されます(確定前は「予定」タブのみ表示されます)。")
-
-st.divider()
-
-# ======================================================================
 # 自分の予定勤務・実績勤務
 # ======================================================================
 st.header("📋 自分の勤務(予定・実績)")
 
+scheduled_snapshot = ds.load_schedule_snapshot(year, month)
+actual_snapshot = ds.load_actual_snapshot(year, month)
 
 
 def _my_shifts(entries: list, name: str) -> list:
