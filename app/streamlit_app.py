@@ -201,21 +201,35 @@ def inject_mobile_css() -> None:
         /* Streamlitネイティブボタン式カレンダー: スマホでも7列固定 */
         .native-cal-weekday {
             text-align: center;
-            font-weight: 700;
-            color: #6b7280;
+            font-weight: 800;
+            color: #4b5563;
             padding: 0.15rem 0;
             font-size: 0.95rem;
         }
         .native-cal-empty {
-            min-height: 3.2rem;
+            height: 3.2rem;
             border: 1px solid #e5e7eb;
-            border-radius: 0.55rem;
+            border-radius: 0.7rem;
             background: #f8fafc;
-            opacity: 0.5;
+            opacity: 0.55;
         }
         div.stButton > button {
             white-space: pre-line !important;
-            line-height: 1.1 !important;
+            line-height: 1.05 !important;
+            height: 3.2rem !important;
+            min-height: 3.2rem !important;
+            max-height: 3.2rem !important;
+            padding: 0.12rem 0.02rem !important;
+            border-radius: 0.7rem !important;
+            background: #f8fafc !important;
+            border: 1px solid #d1d5db !important;
+            color: #1f2937 !important;
+            font-weight: 800 !important;
+            box-shadow: none !important;
+        }
+        div.stButton > button:hover {
+            border-color: #94a3b8 !important;
+            background: #eef2f7 !important;
         }
         @media (max-width: 640px) {
             .block-container {
@@ -239,17 +253,21 @@ def inject_mobile_css() -> None:
             div.stButton > button {
                 min-width: 0 !important;
                 width: 100% !important;
-                min-height: 3.15rem !important;
-                padding: 0.15rem 0.02rem !important;
+                height: 2.85rem !important;
+                min-height: 2.85rem !important;
+                max-height: 2.85rem !important;
+                padding: 0.08rem 0 !important;
                 font-size: 0.72rem !important;
-                border-radius: 0.55rem !important;
+                border-radius: 0.6rem !important;
             }
             .native-cal-weekday {
                 font-size: 0.8rem;
             }
             .native-cal-empty {
-                min-height: 3.15rem;
-                border-radius: 0.55rem;
+                height: 2.85rem;
+                min-height: 2.85rem;
+                max-height: 2.85rem;
+                border-radius: 0.6rem;
             }
         }
 

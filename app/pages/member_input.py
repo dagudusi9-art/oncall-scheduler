@@ -108,8 +108,16 @@ st.markdown("".join(legend_html), unsafe_allow_html=True)
 
 weeks = uc.month_weeks(year, month)
 
-# 重要: HTMLリンクだと環境によってタップ時にPython側へイベントが届かないことがあるため、
-# Streamlitのネイティブボタンで描画する。CSSでスマホでも7列を維持する。
+# Streamlitのネイティブボタンで描画する。
+# ボタン内の文字量が状態ごとに変わるとセルの高さが揺れるため、
+# 表示は「日付 + 色付き短縮記号」だけに固定する。
+STATE_SHORT_LABEL = {
+    ds.STATE_OK: "🟢○",
+    ds.STATE_FULL_OFF: "🔴×",
+    ds.STATE_DAY_OFF: "🟡昼",
+    ds.STATE_NIGHT_OFF: "🔵夜",
+}
+
 weekday_cols = st.columns(7, gap="small")
 for col, wd in zip(weekday_cols, uc.WEEKDAY_JA):
     col.markdown(f"<div class='native-cal-weekday'>{html.escape(wd)}</div>", unsafe_allow_html=True)
@@ -124,7 +132,7 @@ for week_index, week in enumerate(weeks):
 
             day_str = d.isoformat()
             state = ds.get_member_day_state(year, month, selected, day_str)
-            label = f"{d.day}\n{ds.STATE_LABEL[state]}"
+            label = f"{d.day}\n{STATE_SHORT_LABEL[state]}"
             if st.button(
                 label,
                 key=f"cal_{selected}_{year}_{month}_{day_str}",
@@ -134,7 +142,7 @@ for week_index, week in enumerate(weeks):
                 ds.cycle_member_day_state(year, month, selected, day_str)
                 st.rerun()
 
-st.caption("スマホでも横スクロールなしで7列固定表示にしています。日付ボタンをタップすると即時保存されます。")
+st.caption("各セルは同じ大きさに固定しています。色付き記号: 🟢○=OK、🔴×=終日不可、🟡昼=日中不可、🔵夜=夜間不可")
 
 st.divider()
 
