@@ -31,10 +31,19 @@ import auth  # noqa: E402
 import data_store as ds  # noqa: E402
 import notify  # noqa: E402
 import pdf_export  # noqa: E402
+import sheets_sync as ssync  # noqa: E402
 import ui_common as uc  # noqa: E402
 from src.excel_export import export_to_excel  # noqa: E402
 from src.optimizer import OnCallOptimizer, OptimizerOptions  # noqa: E402
 from src.models import ScheduleEntry, ScheduleResult, Slot  # noqa: E402
+
+
+def _format_sync_time(iso_str: str) -> str:
+    try:
+        return datetime.fromisoformat(iso_str).strftime("%Y-%m-%d %H:%M")
+    except ValueError:
+        return iso_str
+
 
 st.title("🛠️ 管理者画面")
 
@@ -458,15 +467,18 @@ st.divider()
 st.header("6. Googleスプレッドシートへの自動同期")
 
 sync_settings = ds.get_auto_sync_settings()
-cred_path = _PROJECT_ROOT / "credentials" / "service_account.json"
 
-if not cred_path.exists():
+if not ssync.is_configured():
     st.caption(
-        "credentials/service_account.json が見つかりません。"
-        "README「6. Google連携のセットアップ」を参照してサービスアカウントを設定すると、"
-        "この機能が使えるようになります。"
+        "Googleスプレッドシート連携は設定されていません。ローカルでは "
+        "credentials/service_account.json を、Streamlit Community Cloudでは "
+        "st.secrets の [gcp_service_account] を設定すると使えるようになります。"
+        "詳細はREADME「6. Google連携のセットアップ」を参照してください。"
     )
 else:
+    source_label = {"local": "ローカルファイル (credentials/service_account.json)", "secrets": "st.secrets"}
+    st.caption(f"認証情報の取得元: {source_label.get(ssync.credential_source(), '不明')}")
+
     auto_sync_enabled = st.checkbox(
         "メンバーが入力を確定するたびに、Googleスプレッドシートへ自動的に同期する",
         value=sync_settings["enabled"],
@@ -478,6 +490,39 @@ else:
         ds.set_auto_sync_settings(auto_sync_enabled, sheet_key_input.strip())
         st.success("同期設定を保存しました")
         st.rerun()
+
+    if sync_settings["spreadsheet_key"]:
+        st.markdown("**入力データ(不都合日)の一括保存・読み込み**")
+        manual_col1, manual_col2 = st.columns(2)
+        with manual_col1:
+            if st.button("📤 全員分をスプレッドシートに保存", use_container_width=True):
+                ok, message = ssync.save_all(config["year"], config["month"])
+                (st.success if ok else st.error)(message)
+        with manual_col2:
+            confirm_load = st.checkbox(
+                "Google Sheetsの内容でローカルデータを更新します。よろしいですか?",
+                key="confirm_load_all_unavailability",
+            )
+            if st.button(
+                "📥 全員分をスプレッドシートから読み込む",
+                use_container_width=True,
+                disabled=not confirm_load,
+            ):
+                ok, message = ssync.load_all(config["year"], config["month"])
+                if ok:
+                    st.success(message)
+                    st.rerun()
+                else:
+                    st.error(message)
+
+        admin_sync_times = ds.get_admin_sheets_sync(config["year"], config["month"])
+        if admin_sync_times.get("saved") or admin_sync_times.get("loaded"):
+            parts = []
+            if admin_sync_times.get("saved"):
+                parts.append(f"保存: {_format_sync_time(admin_sync_times['saved'])}")
+            if admin_sync_times.get("loaded"):
+                parts.append(f"読み込み: {_format_sync_time(admin_sync_times['loaded'])}")
+            st.caption("最終同期時刻 - " + " / ".join(parts))
 
 st.divider()
 
@@ -786,12 +831,13 @@ else:
                     )
 
                     sync = ds.get_auto_sync_settings()
-                    if sync["enabled"] and sync["spreadsheet_key"] and cred_path.exists():
+                    if sync["enabled"] and sync["spreadsheet_key"] and ssync.is_configured():
                         try:
-                            from src.sheets_io import SheetsClient
-
-                            client = SheetsClient(credentials_path=cred_path, spreadsheet_key=sync["spreadsheet_key"])
-                            client.write_schedule(effective_result)
+                            client = ssync.get_client(sync["spreadsheet_key"])
+                            if client is None:
+                                st.warning("スプレッドシートへの自動同期に失敗しました: 接続できませんでした")
+                            else:
+                                client.write_schedule(effective_result)
                         except Exception as e:  # noqa: BLE001
                             st.warning(f"スプレッドシートへの自動同期に失敗しました: {e}")
 
@@ -799,8 +845,8 @@ else:
                     st.rerun()
 
             st.subheader("🔗 Googleスプレッドシートへ手動で書き込み")
-            if not cred_path.exists():
-                st.caption("credentials/service_account.json が見つかりません。")
+            if not ssync.is_configured():
+                st.caption("Googleスプレッドシート連携が設定されていません。")
             else:
                 spreadsheet_key = st.text_input(
                     "書き込み先スプレッドシートのID",
@@ -812,11 +858,12 @@ else:
                         st.error("下書きの再作成が必要です。「勤務表を作成する」を押してください。")
                     else:
                         try:
-                            from src.sheets_io import SheetsClient
-
-                            client = SheetsClient(credentials_path=cred_path, spreadsheet_key=spreadsheet_key)
-                            client.write_schedule(effective_result)
-                            st.success("スプレッドシートに書き込みました")
+                            client = ssync.get_client(spreadsheet_key)
+                            if client is None:
+                                st.error("書き込みに失敗しました: 接続できませんでした")
+                            else:
+                                client.write_schedule(effective_result)
+                                st.success("スプレッドシートに書き込みました")
                         except Exception as e:  # noqa: BLE001
                             st.error(f"書き込みに失敗しました: {e}")
 

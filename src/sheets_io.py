@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -39,15 +39,35 @@ WEEKDAY_JA = ["月", "火", "水", "木", "金", "土", "日"]
 
 
 class SheetsClient:
-    """Google Sheets との読み書きをまとめて扱うクラス"""
+    """Google Sheets との読み書きをまとめて扱うクラス
 
-    def __init__(self, credentials_path: str | Path, spreadsheet_key: str):
+    認証情報は次のいずれかの方法で渡す(両方渡された場合は credentials_info を優先する):
+
+      - credentials_path : ローカルのサービスアカウントJSONファイルへのパス
+                            (ローカル実行・CLI実行時に使用)
+      - credentials_info : サービスアカウントJSONの内容を辞書化したもの
+                            (Streamlit Community Cloud の st.secrets 経由で使用)
+    """
+
+    def __init__(
+        self,
+        credentials_path: Optional[str | Path] = None,
+        spreadsheet_key: str = "",
+        credentials_info: Optional[dict] = None,
+    ):
         if gspread is None:
             raise ImportError(
                 "gspread / google-auth がインストールされていません。"
                 "`pip install gspread google-auth` を実行してください。"
             )
-        creds = Credentials.from_service_account_file(str(credentials_path), scopes=SCOPES)
+        if not spreadsheet_key:
+            raise ValueError("spreadsheet_key が指定されていません。")
+        if credentials_info is not None:
+            creds = Credentials.from_service_account_info(credentials_info, scopes=SCOPES)
+        elif credentials_path is not None:
+            creds = Credentials.from_service_account_file(str(credentials_path), scopes=SCOPES)
+        else:
+            raise ValueError("credentials_path または credentials_info のいずれかが必要です。")
         self.gc = gspread.authorize(creds)
         self.sh = self.gc.open_by_key(spreadsheet_key)
 
@@ -119,8 +139,12 @@ class SheetsClient:
         worksheet_name: str = "不都合日入力",
     ) -> None:
         """
-        Webアプリの不都合日データ(ロング形式)をスプレッドシートへ書き込む
-        (自動同期機能用)。既存内容は上書きする。
+        Webアプリの不都合日データ(ロング形式)をスプレッドシートへ書き込む。
+        渡された unavailabilities がその時点の全メンバー分のデータであることを
+        前提に、シート全体を上書きする(管理者による一括保存用)。
+
+        複数人が同時に入力している状況で1人分だけを保存したい場合は
+        write_unavailability_for_member() を使うこと。
         """
         ws = self._get_or_create_worksheet(worksheet_name)
         ws.clear()
@@ -130,6 +154,54 @@ class SheetsClient:
                 [u.member_name, u.day.isoformat(), int(u.day_unavailable), int(u.night_unavailable)]
             )
         ws.update(values=rows, range_name="A1")
+
+    def write_unavailability_for_member(
+        self,
+        member_name: str,
+        unavailabilities: List[Unavailability],
+        worksheet_name: str = "不都合日入力",
+    ) -> None:
+        """
+        1名分の不都合日データだけをスプレッドシートに反映する。
+
+        シート上の他メンバーの行はそのまま残し、member_name の行だけを
+        削除してから渡された unavailabilities で置き換える。
+        複数の医師が同時期にそれぞれ自分の入力を保存する運用でも、
+        互いのデータを消してしまわないようにするための書き込み方法。
+        """
+        ws = self._get_or_create_worksheet(worksheet_name)
+        existing_records = ws.get_all_records()
+
+        other_rows = [
+            [
+                r.get("member_name", ""),
+                str(r.get("date", "")),
+                int(bool(r.get("day_unavailable", 0))),
+                int(bool(r.get("night_unavailable", 0))),
+            ]
+            for r in existing_records
+            if str(r.get("member_name", "")) != member_name
+        ]
+
+        own_rows = [
+            [member_name, u.day.isoformat(), int(u.day_unavailable), int(u.night_unavailable)]
+            for u in sorted(unavailabilities, key=lambda x: x.day)
+        ]
+
+        rows = [["member_name", "date", "day_unavailable", "night_unavailable"]]
+        rows.extend(sorted(other_rows + own_rows, key=lambda r: (r[1], r[0])))
+
+        ws.clear()
+        ws.update(values=rows, range_name="A1")
+
+    def load_unavailability_for_member(
+        self,
+        member_name: str,
+        worksheet_name: str = "不都合日入力",
+    ) -> List[Unavailability]:
+        """指定した1名分の不都合日データだけをシートから読み込む"""
+        all_records = self.load_unavailability(worksheet_name=worksheet_name)
+        return [u for u in all_records if u.member_name == member_name]
 
     def _get_or_create_worksheet(self, name: str, rows: int = 100, cols: int = 10):
         try:

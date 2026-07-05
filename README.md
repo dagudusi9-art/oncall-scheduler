@@ -140,6 +140,9 @@ streamlit run app/streamlit_app.py
   の順に状態が切り替わる
 - タップした瞬間に自動保存され、最終更新日時も記録される(保存ボタンを押し忘れる心配がない)
 - 「入力内容を確定する」を押すと、(管理者が自動同期をONにしていれば)Googleスプレッドシートへも同期される
+- Google連携が設定されている場合、「💾 スプレッドシートに保存」「🔄 スプレッドシートから読み込む」ボタンで
+  自分の入力データだけを手動でも同期できる(他のメンバーのデータには影響しない)。
+  保存・読み込みを行うと最終同期時刻が表示される
 - LINEでの連絡や、管理者による転記作業は不要になる
 
 この「ワンタップで状態が切り替わる」方式により、日中/夜間を別々に
@@ -159,7 +162,9 @@ streamlit run app/streamlit_app.py
    (入力済み/未入力/入力日数/最終更新日時)、未入力者へのリマインダー
    (LINE共有リンク・メール送信)
 6. **Googleスプレッドシートへの自動同期**: メンバーが入力を確定するたびに
-   自動でスプレッドシートへ反映する設定
+   自動でスプレッドシートへ反映する設定。「📤 全員分をスプレッドシートに保存」
+   「📥 全員分をスプレッドシートから読み込む」ボタンで手動一括同期も行える
+   (読み込みはローカルデータを上書きするため、実行前に確認チェックボックスが必要)
 7. **勤務表の作成・確定**:
    - 「勤務表を作成する(下書き)」で最適化を実行し、カレンダー表示・集計表・
      Excelダウンロードで内容を確認できる
@@ -400,6 +405,39 @@ python -m src.main \
 このモードでは、管理者設定シート(シート名「管理者設定」)から
 年月・メンバー・目標回数も読み込みます。レイアウトは
 `src/sheets_io.py` の `SheetsClient.load_config()` のdocstringを参照してください。
+
+### 6-4. Streamlit Community Cloudで使う場合(st.secrets)
+
+Streamlit Community Cloudにデプロイする場合、サービスアカウントJSONファイルを
+リポジトリに含めることはできない(セキュリティ上も推奨されない)ため、
+Streamlitの `st.secrets` 機能を使って認証情報を渡す。
+
+1. ローカルでダウンロードしたサービスアカウントJSONの内容を開く
+2. Streamlit Community Cloudの管理画面 →「Settings」→「Secrets」で、
+   以下の形式でJSONの各キーを貼り付ける(TOML形式)
+
+   ```toml
+   [gcp_service_account]
+   type = "service_account"
+   project_id = "..."
+   private_key_id = "..."
+   private_key = "-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n"
+   client_email = "xxxx@xxxx.iam.gserviceaccount.com"
+   client_id = "..."
+   auth_uri = "https://accounts.google.com/o/oauth2/auth"
+   token_uri = "https://oauth2.googleapis.com/token"
+   auth_provider_x509_cert_url = "https://www.googleapis.com/oauth2/v1/certs"
+   client_x509_cert_url = "..."
+   ```
+
+3. ローカル開発中に同じ設定を試したい場合は、リポジトリ直下に
+   `.streamlit/secrets.toml` を作成し、同じ内容を書けばよい
+   (このファイルは `.gitignore` で除外済みのため、誤ってコミットされない)
+
+アプリ側は起動時に、まず `st.secrets["gcp_service_account"]` の有無を確認し、
+無ければローカルの `credentials/service_account.json` を使う。どちらも無い場合は
+Google連携の機能(保存・読み込みボタンなど)が非表示・案内表示のみになり、
+アプリ自体は通常どおり起動する。
 
 ---
 

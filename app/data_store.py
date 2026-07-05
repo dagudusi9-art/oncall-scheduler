@@ -397,6 +397,39 @@ def get_submission_stats(year: int, month: int) -> Dict[str, int]:
     return {name: len(days) for name, days in data.items()}
 
 
+def replace_member_unavailability(year: int, month: int, member_name: str, day_map: Dict[str, dict]) -> None:
+    """
+    member_name 1名分の不都合日データを day_map で完全に置き換える。
+    day_map は {"YYYY-MM-DD": {"day": bool, "night": bool}, ...} の形式。
+    他メンバーのデータは変更しない(Googleスプレッドシートからの
+    1人分読み込みなど、複数人が同時に入力する運用向け)。
+    """
+    data = load_unavailability_raw(year, month)
+    # STATE_OK相当(day=False, night=False)の日はローカル側の表現に合わせて保存しない
+    data[member_name] = {
+        day_str: {"day": bool(flags.get("day", False)), "night": bool(flags.get("night", False))}
+        for day_str, flags in day_map.items()
+        if flags.get("day", False) or flags.get("night", False)
+    }
+    save_unavailability_raw(year, month, data)
+
+
+def replace_all_unavailability(year: int, month: int, by_member: Dict[str, Dict[str, dict]]) -> None:
+    """
+    全メンバー分の不都合日データを by_member で完全に置き換える
+    (管理者による「Google Sheetsから一括読み込み」用)。
+    by_member は {"名前": {"YYYY-MM-DD": {"day": bool, "night": bool}, ...}, ...} の形式。
+    """
+    cleaned: Dict[str, Dict[str, dict]] = {}
+    for member_name, day_map in by_member.items():
+        cleaned[member_name] = {
+            day_str: {"day": bool(flags.get("day", False)), "night": bool(flags.get("night", False))}
+            for day_str, flags in day_map.items()
+            if flags.get("day", False) or flags.get("night", False)
+        }
+    save_unavailability_raw(year, month, cleaned)
+
+
 # ----------------------------------------------------------------------
 # 最終更新日時(入力状況の可視化用)
 # ----------------------------------------------------------------------
@@ -425,6 +458,63 @@ def get_last_updated(year: int, month: int) -> Dict[str, str]:
         return {}
     with path.open("r", encoding="utf-8") as f:
         return json.load(f)
+
+
+# ----------------------------------------------------------------------
+# Googleスプレッドシートとの最終同期時刻
+# ----------------------------------------------------------------------
+
+
+def _sheets_sync_path(year: int, month: int) -> Path:
+    return DATA_DIR / f"sheets_sync_{_month_key(year, month)}.json"
+
+
+def _load_sheets_sync(year: int, month: int) -> dict:
+    path = _sheets_sync_path(year, month)
+    if not path.exists():
+        return {"members": {}, "admin": {}}
+    with path.open("r", encoding="utf-8") as f:
+        data = json.load(f)
+    data.setdefault("members", {})
+    data.setdefault("admin", {})
+    return data
+
+
+def _save_sheets_sync(year: int, month: int, data: dict) -> None:
+    path = _sheets_sync_path(year, month)
+    with path.open("w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+def set_member_sheets_sync(year: int, month: int, member_name: str, kind: str) -> None:
+    """kind は 'saved' または 'loaded'。医師本人の最終同期時刻を記録する。"""
+    from datetime import datetime as _dt
+
+    data = _load_sheets_sync(year, month)
+    member_record = data["members"].setdefault(member_name, {})
+    member_record[kind] = _dt.now().isoformat()
+    _save_sheets_sync(year, month, data)
+
+
+def get_member_sheets_sync(year: int, month: int, member_name: str) -> Dict[str, str]:
+    """{"saved": ISO文字列, "loaded": ISO文字列} を返す(無ければキー無し)"""
+    data = _load_sheets_sync(year, month)
+    return data["members"].get(member_name, {})
+
+
+def set_admin_sheets_sync(year: int, month: int, kind: str) -> None:
+    """kind は 'saved' または 'loaded'。管理者による一括同期の最終時刻を記録する。"""
+    from datetime import datetime as _dt
+
+    data = _load_sheets_sync(year, month)
+    data["admin"][kind] = _dt.now().isoformat()
+    _save_sheets_sync(year, month, data)
+
+
+def get_admin_sheets_sync(year: int, month: int) -> Dict[str, str]:
+    """{"saved": ISO文字列, "loaded": ISO文字列} を返す(無ければキー無し)"""
+    data = _load_sheets_sync(year, month)
+    return data["admin"]
 
 
 # ----------------------------------------------------------------------

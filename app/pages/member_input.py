@@ -28,7 +28,18 @@ if str(_APP_DIR) not in sys.path:
 
 import auth  # noqa: E402
 import data_store as ds  # noqa: E402
+import sheets_sync as ssync  # noqa: E402
 import ui_common as uc  # noqa: E402
+
+
+def _format_sync_time(iso_str: str) -> str:
+    from datetime import datetime as _dt
+
+    try:
+        return _dt.fromisoformat(iso_str).strftime("%Y-%m-%d %H:%M")
+    except ValueError:
+        return iso_str
+
 
 st.title("👤 不都合日入力")
 
@@ -233,21 +244,49 @@ if st.button("✅ 入力内容を確定する", type="primary"):
 
     sync_settings = ds.get_auto_sync_settings()
     if sync_settings["enabled"] and sync_settings["spreadsheet_key"]:
-        cred_path = _APP_DIR.parent / "credentials" / "service_account.json"
-        if cred_path.exists():
-            try:
-                from src.sheets_io import SheetsClient
-
-                client = SheetsClient(
-                    credentials_path=cred_path, spreadsheet_key=sync_settings["spreadsheet_key"]
-                )
-                unavailabilities = ds.get_unavailability_objects(year, month)
-                client.write_unavailability(unavailabilities)
-                st.success("Googleスプレッドシートにも同期しました")
-            except Exception as e:  # noqa: BLE001
-                st.warning(f"スプレッドシートへの同期に失敗しました(入力内容自体は保存済みです): {e}")
+        ok, message = ssync.save_member(year, month, selected)
+        if ok:
+            st.success(message)
+        else:
+            st.warning(f"スプレッドシートへの同期に失敗しました(入力内容自体は保存済みです): {message}")
 
 st.caption("入力後、内容の変更が必要な場合は再度タップして状態を切り替えてください。このURLは毎月そのまま使えます。")
+
+st.divider()
+
+# ======================================================================
+# Googleスプレッドシートへの保存・読み込み(任意)
+# ======================================================================
+st.subheader("☁️ Googleスプレッドシートと同期")
+
+if not ssync.is_configured():
+    st.caption(
+        "Googleスプレッドシート連携は設定されていません。管理者画面から設定すると、"
+        "この場所で自分の入力内容を保存・読み込みできるようになります。"
+    )
+else:
+    sync_col1, sync_col2 = st.columns(2)
+    with sync_col1:
+        if st.button("💾 スプレッドシートに保存", use_container_width=True):
+            ok, message = ssync.save_member(year, month, selected)
+            (st.success if ok else st.error)(message)
+    with sync_col2:
+        if st.button("🔄 スプレッドシートから読み込む", use_container_width=True):
+            ok, message = ssync.load_member(year, month, selected)
+            if ok:
+                st.success(message)
+                st.rerun()
+            else:
+                st.error(message)
+
+    sync_times = ds.get_member_sheets_sync(year, month, selected)
+    if sync_times.get("saved") or sync_times.get("loaded"):
+        parts = []
+        if sync_times.get("saved"):
+            parts.append(f"保存: {_format_sync_time(sync_times['saved'])}")
+        if sync_times.get("loaded"):
+            parts.append(f"読み込み: {_format_sync_time(sync_times['loaded'])}")
+        st.caption("最終同期時刻 - " + " / ".join(parts))
 
 st.divider()
 
