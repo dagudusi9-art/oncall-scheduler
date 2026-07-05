@@ -196,6 +196,63 @@ def inject_mobile_css() -> None:
                 max-width: 100% !important;
             }
         }
+
+
+        /* Streamlitネイティブボタン式カレンダー: スマホでも7列固定 */
+        .native-cal-weekday {
+            text-align: center;
+            font-weight: 700;
+            color: #6b7280;
+            padding: 0.15rem 0;
+            font-size: 0.95rem;
+        }
+        .native-cal-empty {
+            min-height: 3.2rem;
+            border: 1px solid #e5e7eb;
+            border-radius: 0.55rem;
+            background: #f8fafc;
+            opacity: 0.5;
+        }
+        div.stButton > button {
+            white-space: pre-line !important;
+            line-height: 1.1 !important;
+        }
+        @media (max-width: 640px) {
+            .block-container {
+                padding-left: 0.85rem !important;
+                padding-right: 0.85rem !important;
+            }
+            [data-testid="stHorizontalBlock"] {
+                display: flex !important;
+                flex-direction: row !important;
+                flex-wrap: nowrap !important;
+                gap: 0.25rem !important;
+                width: 100% !important;
+                max-width: 100% !important;
+                overflow: visible !important;
+            }
+            [data-testid="stHorizontalBlock"] > div {
+                min-width: 0 !important;
+                width: 14.2857% !important;
+                flex: 1 1 0 !important;
+            }
+            div.stButton > button {
+                min-width: 0 !important;
+                width: 100% !important;
+                min-height: 3.15rem !important;
+                padding: 0.15rem 0.02rem !important;
+                font-size: 0.72rem !important;
+                border-radius: 0.55rem !important;
+            }
+            .native-cal-weekday {
+                font-size: 0.8rem;
+            }
+            .native-cal-empty {
+                min-height: 3.15rem;
+                border-radius: 0.55rem;
+            }
+        }
+
         </style>
         """,
         unsafe_allow_html=True,

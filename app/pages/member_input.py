@@ -108,34 +108,33 @@ st.markdown("".join(legend_html), unsafe_allow_html=True)
 
 weeks = uc.month_weeks(year, month)
 
-calendar_html = ["<div class='mobile-calendar' aria-label='不都合日カレンダー'>"]
-for wd in uc.WEEKDAY_JA:
-    calendar_html.append(f"<div class='mobile-calendar-weekday'>{html.escape(wd)}</div>")
+# 重要: HTMLリンクだと環境によってタップ時にPython側へイベントが届かないことがあるため、
+# Streamlitのネイティブボタンで描画する。CSSでスマホでも7列を維持する。
+weekday_cols = st.columns(7, gap="small")
+for col, wd in zip(weekday_cols, uc.WEEKDAY_JA):
+    col.markdown(f"<div class='native-cal-weekday'>{html.escape(wd)}</div>", unsafe_allow_html=True)
 
-for week in weeks:
-    for d in week:
-        if d is None:
-            calendar_html.append("<div class='mobile-calendar-empty' aria-hidden='true'></div>")
-            continue
+for week_index, week in enumerate(weeks):
+    cols = st.columns(7, gap="small")
+    for col_index, d in enumerate(week):
+        with cols[col_index]:
+            if d is None:
+                st.markdown("<div class='native-cal-empty'>&nbsp;</div>", unsafe_allow_html=True)
+                continue
 
-        day_str = d.isoformat()
-        state = ds.get_member_day_state(year, month, selected, day_str)
-        query = urlencode({"token": token, "set_day": day_str})
-        weekend_mark = " weekend" if uc.is_weekend(d) else ""
-        calendar_html.append(
-            f"<a class='mobile-calendar-cell{weekend_mark}' "
-            f"href='?{query}' "
-            f"style='background-color:{ds.STATE_COLOR[state]};' "
-            f"aria-label='{d.day}日 {ds.STATE_LABEL[state]}'>"
-            f"<span><span class='mobile-calendar-day'>{d.day}</span>"
-            f"<span class='mobile-calendar-state'>{html.escape(ds.STATE_LABEL[state])}</span></span>"
-            "</a>"
-        )
+            day_str = d.isoformat()
+            state = ds.get_member_day_state(year, month, selected, day_str)
+            label = f"{d.day}\n{ds.STATE_LABEL[state]}"
+            if st.button(
+                label,
+                key=f"cal_{selected}_{year}_{month}_{day_str}",
+                use_container_width=True,
+                help=f"{d.day}日: {ds.STATE_LABEL[state]}",
+            ):
+                ds.cycle_member_day_state(year, month, selected, day_str)
+                st.rerun()
 
-calendar_html.append("</div>")
-st.markdown("".join(calendar_html), unsafe_allow_html=True)
-
-st.caption("スマホで見やすいように7列固定表示にしています。日付をタップすると即時保存されます。")
+st.caption("スマホでも横スクロールなしで7列固定表示にしています。日付ボタンをタップすると即時保存されます。")
 
 st.divider()
 
