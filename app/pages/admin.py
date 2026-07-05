@@ -13,6 +13,8 @@
 - ワンタップでの勤務表確定 → Excel/PDF自動出力・LINE共有文言の生成
 """
 import sys
+import html
+from urllib.parse import urlencode
 from datetime import date, datetime
 from pathlib import Path
 from typing import Optional
@@ -49,6 +51,16 @@ with col_logout:
         st.rerun()
 
 config = ds.load_config()
+
+# 管理者カレンダーのリンク型トグル。スマホでst.columnsが崩れないよう、
+# 外部バイト日カレンダーもHTMLグリッドで描画する。
+toggle_gaikobu = st.query_params.get("toggle_gaikobu")
+if toggle_gaikobu:
+    valid_days = {d.isoformat() for week in uc.month_weeks(config["year"], config["month"]) for d in week if d is not None}
+    if toggle_gaikobu in valid_days:
+        ds.toggle_gaikobu_day(config["year"], config["month"], toggle_gaikobu)
+    st.query_params.clear()
+    st.rerun()
 
 # ======================================================================
 # 1. 年月設定
@@ -188,23 +200,30 @@ year_for_gaikobu, month_for_gaikobu = config["year"], config["month"]
 gaikobu_day_set = set(ds.get_gaikobu_days(year_for_gaikobu, month_for_gaikobu))
 weeks_gaikobu = uc.month_weeks(year_for_gaikobu, month_for_gaikobu)
 
-header_cols_g = st.columns(7)
-for col, wd in zip(header_cols_g, uc.WEEKDAY_JA):
-    col.markdown(f"<div style='text-align:center;font-weight:bold'>{wd}</div>", unsafe_allow_html=True)
+gaikobu_html = ["<div class='mobile-calendar' aria-label='外部バイト日カレンダー'>"]
+for wd in uc.WEEKDAY_JA:
+    gaikobu_html.append(f"<div class='mobile-calendar-weekday'>{html.escape(wd)}</div>")
 
 for week in weeks_gaikobu:
-    row_cols_g = st.columns(7)
-    for col, d in zip(row_cols_g, week):
-        with col:
-            if d is None:
-                st.write("")
-                continue
-            day_str = d.isoformat()
-            is_on = day_str in gaikobu_day_set
-            label = f"{d.day}\n{'🚑対象' if is_on else '-'}"
-            if st.button(label, key=f"gaikobu_toggle_{day_str}", use_container_width=True):
-                ds.toggle_gaikobu_day(year_for_gaikobu, month_for_gaikobu, day_str)
-                st.rerun()
+    for d in week:
+        if d is None:
+            gaikobu_html.append("<div class='mobile-calendar-empty' aria-hidden='true'></div>")
+            continue
+        day_str = d.isoformat()
+        is_on = day_str in gaikobu_day_set
+        bg = "#F8CCCC" if is_on else "#F8FAFC"
+        state_text = "🚑" if is_on else "－"
+        query = urlencode({"toggle_gaikobu": day_str})
+        gaikobu_html.append(
+            f"<a class='mobile-calendar-cell' href='?{query}' "
+            f"style='background-color:{bg};' aria-label='{d.day}日 外部バイト{state_text}'>"
+            f"<span><span class='mobile-calendar-day'>{d.day}</span>"
+            f"<span class='mobile-calendar-state'>{state_text}</span></span>"
+            "</a>"
+        )
+
+gaikobu_html.append("</div>")
+st.markdown("".join(gaikobu_html), unsafe_allow_html=True)
 
 n_gaikobu_days = len(gaikobu_day_set)
 n_eligible_now = len([m for m in ds.get_members() if m.get("gaikobu_eligible", False)])

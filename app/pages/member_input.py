@@ -15,6 +15,8 @@
   月が変わってもURLを再取得する必要はない)
 """
 import sys
+import html
+from urllib.parse import urlencode
 from datetime import date
 from pathlib import Path
 
@@ -51,6 +53,17 @@ if selected not in member_names:
 
 year, month = config["year"], config["month"]
 
+# URLリンク型カレンダー用: ?set_day=YYYY-MM-DD が来たら状態を切り替えて、
+# すぐに通常URLへ戻す。st.columns/st.buttonを使わないため、スマホでも7列が崩れない。
+set_day = st.query_params.get("set_day")
+if set_day:
+    valid_days = {d.isoformat() for week in uc.month_weeks(year, month) for d in week if d is not None}
+    if set_day in valid_days:
+        ds.cycle_member_day_state(year, month, selected, set_day)
+    st.query_params.clear()
+    st.query_params["token"] = token
+    st.rerun()
+
 st.info(f"ログイン中: **{selected}** さん")
 
 st.subheader(f"{year}年{month}月 の不都合日")
@@ -77,52 +90,52 @@ st.markdown(
     "タップした瞬間に自動保存されます。"
 )
 
-legend_cols = st.columns(4)
 legend_items = [
     (ds.STATE_OK, "終日OK"),
     (ds.STATE_FULL_OFF, "終日不可"),
     (ds.STATE_DAY_OFF, "日中不可"),
     (ds.STATE_NIGHT_OFF, "夜間不可"),
 ]
-for col, (state, text) in zip(legend_cols, legend_items):
-    with col:
-        st.markdown(
-            f"<div style='background-color:{ds.STATE_COLOR[state]};"
-            f"padding:6px;border-radius:6px;text-align:center;font-size:0.85em'>"
-            f"{ds.STATE_LABEL[state]} {text}</div>",
-            unsafe_allow_html=True,
-        )
-
-st.write("")
+legend_html = ["<div class='mobile-legend'>"]
+for state, text in legend_items:
+    legend_html.append(
+        "<div class='mobile-legend-item' "
+        f"style='background-color:{ds.STATE_COLOR[state]};'>"
+        f"{html.escape(ds.STATE_LABEL[state])} {html.escape(text)}</div>"
+    )
+legend_html.append("</div>")
+st.markdown("".join(legend_html), unsafe_allow_html=True)
 
 weeks = uc.month_weeks(year, month)
 
-# 曜日ヘッダー
-header_cols = st.columns(7)
-for col, wd in zip(header_cols, uc.WEEKDAY_JA):
-    col.markdown(f"<div style='text-align:center;font-weight:bold'>{wd}</div>", unsafe_allow_html=True)
+calendar_html = ["<div class='mobile-calendar' aria-label='不都合日カレンダー'>"]
+for wd in uc.WEEKDAY_JA:
+    calendar_html.append(f"<div class='mobile-calendar-weekday'>{html.escape(wd)}</div>")
 
 for week in weeks:
-    row_cols = st.columns(7)
-    for col, d in zip(row_cols, week):
-        with col:
-            if d is None:
-                st.write("")
-                continue
-            day_str = d.isoformat()
-            state = ds.get_member_day_state(year, month, selected, day_str)
-            label = f"{d.day}\n{ds.STATE_LABEL[state]}"
-            btn_key = f"day_{selected}_{day_str}"
-            # 状態に応じた背景色をボタン直上に表示(視覚的な補助)
-            st.markdown(
-                f"<div style='background-color:{ds.STATE_COLOR[state]};"
-                f"border-radius:6px;padding:2px;text-align:center;font-size:0.75em'>"
-                f"{'土日' if uc.is_weekend(d) else ''}</div>",
-                unsafe_allow_html=True,
-            )
-            if st.button(label, key=btn_key, use_container_width=True):
-                ds.cycle_member_day_state(year, month, selected, day_str)
-                st.rerun()
+    for d in week:
+        if d is None:
+            calendar_html.append("<div class='mobile-calendar-empty' aria-hidden='true'></div>")
+            continue
+
+        day_str = d.isoformat()
+        state = ds.get_member_day_state(year, month, selected, day_str)
+        query = urlencode({"token": token, "set_day": day_str})
+        weekend_mark = " weekend" if uc.is_weekend(d) else ""
+        calendar_html.append(
+            f"<a class='mobile-calendar-cell{weekend_mark}' "
+            f"href='?{query}' "
+            f"style='background-color:{ds.STATE_COLOR[state]};' "
+            f"aria-label='{d.day}日 {ds.STATE_LABEL[state]}'>"
+            f"<span><span class='mobile-calendar-day'>{d.day}</span>"
+            f"<span class='mobile-calendar-state'>{html.escape(ds.STATE_LABEL[state])}</span></span>"
+            "</a>"
+        )
+
+calendar_html.append("</div>")
+st.markdown("".join(calendar_html), unsafe_allow_html=True)
+
+st.caption("スマホで見やすいように7列固定表示にしています。日付をタップすると即時保存されます。")
 
 st.divider()
 
@@ -173,9 +186,8 @@ def _my_shifts(entries: list, name: str) -> list:
     return rows
 
 
-col_sched, col_actual = st.columns(2)
-with col_sched:
-    st.subheader("予定")
+tab_sched, tab_actual = st.tabs(["予定", "実績"])
+with tab_sched:
     if scheduled_snapshot:
         my_scheduled = _my_shifts(scheduled_snapshot["entries"], selected)
         if my_scheduled:
@@ -185,8 +197,7 @@ with col_sched:
     else:
         st.caption("まだ勤務表が確定されていません。")
 
-with col_actual:
-    st.subheader("実績")
+with tab_actual:
     if actual_snapshot:
         my_actual = _my_shifts(actual_snapshot["entries"], selected)
         if my_actual:

@@ -18,45 +18,121 @@ st.set_page_config(page_title="オンコール自動割当システム", page_ic
 
 
 def inject_mobile_css() -> None:
-    """スマホでもカレンダーの7列グリッドが崩れないようにする。
+    """スマホ優先のCSS。
 
-    Streamlit の st.columns は狭い画面では縦積みになるため、
-    不都合日入力カレンダーの曜日と日付が縦一列に崩れる。
-    スマホ運用を優先し、横スクロールなしで列幅を縮めて7列を維持する。
+    Streamlit の st.columns はスマホ幅で縦積みになりやすいため、
+    カレンダーは専用のHTML/CSSグリッド(.mobile-calendar)で描画する。
+    ここでは全体の余白、文字サイズ、カード、表の見やすさも調整する。
     """
     st.markdown(
         """
         <style>
+        :root {
+            --cal-border: #d7dce5;
+            --cal-text: #313443;
+            --cal-muted: #6b7280;
+            --cal-bg: #ffffff;
+            --cal-empty: #f8fafc;
+        }
+
+        /* カレンダー専用: st.columnsではなくHTML Gridで7列を固定 */
+        .mobile-calendar {
+            display: grid;
+            grid-template-columns: repeat(7, minmax(0, 1fr));
+            gap: 6px;
+            width: 100%;
+            max-width: 100%;
+            overflow: visible;
+        }
+        .mobile-calendar-weekday {
+            text-align: center;
+            font-weight: 700;
+            color: var(--cal-muted);
+            font-size: 0.95rem;
+            padding: 4px 0;
+        }
+        .mobile-calendar-cell,
+        .mobile-calendar-empty {
+            min-width: 0;
+            min-height: 54px;
+            border-radius: 10px;
+            border: 1px solid var(--cal-border);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            text-align: center;
+            box-sizing: border-box;
+        }
+        .mobile-calendar-empty {
+            background: var(--cal-empty);
+            opacity: 0.45;
+        }
+        .mobile-calendar-cell {
+            text-decoration: none !important;
+            color: var(--cal-text) !important;
+            font-weight: 650;
+            line-height: 1.15;
+            padding: 6px 2px;
+            -webkit-tap-highlight-color: rgba(0,0,0,0.06);
+        }
+        .mobile-calendar-cell:active {
+            transform: scale(0.98);
+            filter: brightness(0.96);
+        }
+        .mobile-calendar-day {
+            display: block;
+            font-size: 1rem;
+        }
+        .mobile-calendar-state {
+            display: block;
+            font-size: 0.82rem;
+            margin-top: 2px;
+            white-space: nowrap;
+        }
+        .mobile-legend {
+            display: grid;
+            grid-template-columns: repeat(4, minmax(0, 1fr));
+            gap: 6px;
+            margin: 0.5rem 0 1rem 0;
+        }
+        .mobile-legend-item {
+            border-radius: 10px;
+            padding: 8px 4px;
+            text-align: center;
+            font-size: 0.9rem;
+            font-weight: 600;
+            border: 1px solid rgba(49,52,67,0.08);
+        }
+        .mobile-card-grid {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 1rem;
+        }
+        .mobile-card {
+            border: 1px solid #e5e7eb;
+            border-radius: 14px;
+            padding: 1rem;
+            background: #fff;
+        }
+
         @media (max-width: 768px) {
-            /* Streamlit標準のスマホ時カラム縦積みを抑止する */
-            div[data-testid="stHorizontalBlock"] {
-                flex-direction: row !important;
-                flex-wrap: nowrap !important;
-                gap: 0.18rem !important;
-                width: 100% !important;
-            }
-
-            div[data-testid="stHorizontalBlock"] > div[data-testid="column"] {
-                flex: 1 1 0 !important;
-                width: 0 !important;
-                min-width: 0 !important;
-                padding-left: 0 !important;
-                padding-right: 0 !important;
-            }
-
-            /* スマホでは余白と文字を少し詰める */
             section.main > div.block-container {
-                padding-left: 0.55rem !important;
-                padding-right: 0.55rem !important;
+                padding-left: 0.75rem !important;
+                padding-right: 0.75rem !important;
                 padding-top: 1rem !important;
+                max-width: 100% !important;
             }
 
             h1 {
-                font-size: 1.85rem !important;
+                font-size: 1.75rem !important;
                 line-height: 1.2 !important;
             }
-
-            h2, h3 {
+            h2 {
+                font-size: 1.35rem !important;
+                line-height: 1.25 !important;
+            }
+            h3 {
+                font-size: 1.15rem !important;
                 line-height: 1.25 !important;
             }
 
@@ -64,31 +140,66 @@ def inject_mobile_css() -> None:
                 word-break: keep-all;
             }
 
-            /* カレンダーのボタンを7列内に収める */
+            /* 通常ボタンはスマホでタップしやすく */
             div.stButton > button {
-                min-height: 2.75rem !important;
-                padding: 0.15rem 0.05rem !important;
-                font-size: 0.82rem !important;
-                line-height: 1.1 !important;
-                white-space: pre-line !important;
-                overflow-wrap: anywhere !important;
+                min-height: 2.6rem !important;
+                padding: 0.35rem 0.5rem !important;
+                white-space: normal !important;
+                line-height: 1.2 !important;
             }
 
-            /* 凡例・曜日ヘッダーのラベルも小さめにする */
-            div[data-testid="stMarkdownContainer"] {
-                font-size: 0.92rem;
+            /* カレンダーは横スクロールなしで7列維持 */
+            .mobile-calendar {
+                gap: 4px;
+            }
+            .mobile-calendar-weekday {
+                font-size: 0.82rem;
+                padding: 2px 0;
+            }
+            .mobile-calendar-cell,
+            .mobile-calendar-empty {
+                min-height: 44px;
+                border-radius: 8px;
+            }
+            .mobile-calendar-cell {
+                padding: 4px 1px;
+            }
+            .mobile-calendar-day {
+                font-size: 0.9rem;
+            }
+            .mobile-calendar-state {
+                font-size: 0.68rem;
+                letter-spacing: -0.02em;
             }
 
-            /* サイドバーが開いた時に本文を圧迫しすぎないようにする */
+            .mobile-legend {
+                grid-template-columns: repeat(2, minmax(0, 1fr));
+                gap: 6px;
+            }
+            .mobile-legend-item {
+                font-size: 0.86rem;
+                padding: 7px 3px;
+            }
+            .mobile-card-grid {
+                grid-template-columns: 1fr;
+                gap: 0.75rem;
+            }
+
+            /* サイドバーが本文を圧迫しすぎないようにする */
             section[data-testid="stSidebar"] {
                 max-width: 82vw !important;
+            }
+
+            /* DataFrame / data_editor はスマホでは横にはみ出しやすいので枠内に抑える */
+            div[data-testid="stDataFrame"],
+            div[data-testid="stDataEditor"] {
+                max-width: 100% !important;
             }
         }
         </style>
         """,
         unsafe_allow_html=True,
     )
-
 
 inject_mobile_css()
 
