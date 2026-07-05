@@ -207,40 +207,65 @@ def inject_mobile_css() -> None:
             font-size: 0.95rem;
         }
         .native-cal-empty {
-            height: 3.2rem;
+            height: 3.35rem;
             border: 1px solid #e5e7eb;
-            border-radius: 0.7rem;
+            border-radius: 0.75rem;
             background: #f8fafc;
             opacity: 0.55;
         }
+
+        /* カレンダーボタン共通: 文字が変わってもセルの大きさを固定 */
         div.stButton > button {
             white-space: pre-line !important;
-            line-height: 1.05 !important;
-            height: 3.2rem !important;
-            min-height: 3.2rem !important;
-            max-height: 3.2rem !important;
-            padding: 0.12rem 0.02rem !important;
-            border-radius: 0.7rem !important;
-            background: #f8fafc !important;
-            border: 1px solid #d1d5db !important;
+            line-height: 1.02 !important;
+            height: 3.35rem !important;
+            min-height: 3.35rem !important;
+            max-height: 3.35rem !important;
+            padding: 0.10rem 0.02rem !important;
+            border-radius: 0.75rem !important;
+            border: 1px solid #cfd6e4 !important;
             color: #1f2937 !important;
             font-weight: 800 !important;
             box-shadow: none !important;
+            overflow: hidden !important;
+        }
+        div.stButton > button p {
+            margin: 0 !important;
+            line-height: 1.02 !important;
+        }
+
+        /* 状態別カラー。Streamlitのボタンlabelがaria-labelに入る環境で効く */
+        div.stButton > button[aria-label*="×終"] {
+            background: #f7c6c7 !important;
+            border-color: #ee9ca0 !important;
+        }
+        div.stButton > button[aria-label*="▲昼"] {
+            background: #ffe8ac !important;
+            border-color: #f6ce70 !important;
+        }
+        div.stButton > button[aria-label*="▲夜"] {
+            background: #c9dff6 !important;
+            border-color: #9cc2ea !important;
+        }
+        div.stButton > button[aria-label*="○"] {
+            background: #d9f2dc !important;
+            border-color: #aedfb5 !important;
         }
         div.stButton > button:hover {
+            filter: brightness(0.97);
             border-color: #94a3b8 !important;
-            background: #eef2f7 !important;
         }
+
         @media (max-width: 640px) {
             .block-container {
-                padding-left: 0.85rem !important;
-                padding-right: 0.85rem !important;
+                padding-left: 0.75rem !important;
+                padding-right: 0.75rem !important;
             }
             [data-testid="stHorizontalBlock"] {
                 display: flex !important;
                 flex-direction: row !important;
                 flex-wrap: nowrap !important;
-                gap: 0.25rem !important;
+                gap: 0.22rem !important;
                 width: 100% !important;
                 max-width: 100% !important;
                 overflow: visible !important;
@@ -253,21 +278,21 @@ def inject_mobile_css() -> None:
             div.stButton > button {
                 min-width: 0 !important;
                 width: 100% !important;
-                height: 2.85rem !important;
-                min-height: 2.85rem !important;
-                max-height: 2.85rem !important;
-                padding: 0.08rem 0 !important;
-                font-size: 0.72rem !important;
-                border-radius: 0.6rem !important;
+                height: 3.05rem !important;
+                min-height: 3.05rem !important;
+                max-height: 3.05rem !important;
+                padding: 0.06rem 0 !important;
+                font-size: 0.76rem !important;
+                border-radius: 0.62rem !important;
             }
             .native-cal-weekday {
-                font-size: 0.8rem;
+                font-size: 0.82rem;
             }
             .native-cal-empty {
-                height: 2.85rem;
-                min-height: 2.85rem;
-                max-height: 2.85rem;
-                border-radius: 0.6rem;
+                height: 3.05rem;
+                min-height: 3.05rem;
+                max-height: 3.05rem;
+                border-radius: 0.62rem;
             }
         }
 

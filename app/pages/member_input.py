@@ -112,10 +112,10 @@ weeks = uc.month_weeks(year, month)
 # ボタン内の文字量が状態ごとに変わるとセルの高さが揺れるため、
 # 表示は「日付 + 色付き短縮記号」だけに固定する。
 STATE_SHORT_LABEL = {
-    ds.STATE_OK: "🟢○",
-    ds.STATE_FULL_OFF: "🔴×",
-    ds.STATE_DAY_OFF: "🟡昼",
-    ds.STATE_NIGHT_OFF: "🔵夜",
+    ds.STATE_OK: "○",
+    ds.STATE_FULL_OFF: "×終",
+    ds.STATE_DAY_OFF: "▲昼",
+    ds.STATE_NIGHT_OFF: "▲夜",
 }
 
 weekday_cols = st.columns(7, gap="small")
@@ -142,7 +142,7 @@ for week_index, week in enumerate(weeks):
                 ds.cycle_member_day_state(year, month, selected, day_str)
                 st.rerun()
 
-st.caption("各セルは同じ大きさに固定しています。色付き記号: 🟢○=OK、🔴×=終日不可、🟡昼=日中不可、🔵夜=夜間不可")
+st.caption("色で状態を判別できます。表示: ○=終日OK、×終=終日不可、▲昼=日中不可、▲夜=夜間不可")
 
 st.divider()
 
