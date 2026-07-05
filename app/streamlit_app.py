@@ -20,9 +20,11 @@ st.set_page_config(page_title="オンコール自動割当システム", page_ic
 def inject_mobile_css() -> None:
     """スマホ優先のCSS。
 
-    Streamlit の st.columns はスマホ幅で縦積みになりやすいため、
-    カレンダーは専用のHTML/CSSグリッド(.mobile-calendar)で描画する。
-    ここでは全体の余白、文字サイズ、カード、表の見やすさも調整する。
+    カレンダー(不都合日入力・外部バイト日設定)は st.button + st.columns(7) で
+    描画し、各ページ側で st.container(key=...) を使って `.st-key-<key>` の
+    CSSクラスにスコープしたスタイル(7列固定・ボックスサイズ固定・状態別の
+    背景色)を個別に注入している(member_input.py, admin.py を参照)。
+    ここでは、それ以外の全体の余白、文字サイズ、カード、表の見やすさを調整する。
     """
     st.markdown(
         """
@@ -35,60 +37,6 @@ def inject_mobile_css() -> None:
             --cal-empty: #f8fafc;
         }
 
-        /* カレンダー専用: st.columnsではなくHTML Gridで7列を固定 */
-        .mobile-calendar {
-            display: grid;
-            grid-template-columns: repeat(7, minmax(0, 1fr));
-            gap: 6px;
-            width: 100%;
-            max-width: 100%;
-            overflow: visible;
-        }
-        .mobile-calendar-weekday {
-            text-align: center;
-            font-weight: 700;
-            color: var(--cal-muted);
-            font-size: 0.95rem;
-            padding: 4px 0;
-        }
-        .mobile-calendar-cell,
-        .mobile-calendar-empty {
-            min-width: 0;
-            min-height: 54px;
-            border-radius: 10px;
-            border: 1px solid var(--cal-border);
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            text-align: center;
-            box-sizing: border-box;
-        }
-        .mobile-calendar-empty {
-            background: var(--cal-empty);
-            opacity: 0.45;
-        }
-        .mobile-calendar-cell {
-            text-decoration: none !important;
-            color: var(--cal-text) !important;
-            font-weight: 650;
-            line-height: 1.15;
-            padding: 6px 2px;
-            -webkit-tap-highlight-color: rgba(0,0,0,0.06);
-        }
-        .mobile-calendar-cell:active {
-            transform: scale(0.98);
-            filter: brightness(0.96);
-        }
-        .mobile-calendar-day {
-            display: block;
-            font-size: 1rem;
-        }
-        .mobile-calendar-state {
-            display: block;
-            font-size: 0.82rem;
-            margin-top: 2px;
-            white-space: nowrap;
-        }
         .mobile-legend {
             display: grid;
             grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -148,30 +96,6 @@ def inject_mobile_css() -> None:
                 line-height: 1.2 !important;
             }
 
-            /* カレンダーは横スクロールなしで7列維持 */
-            .mobile-calendar {
-                gap: 4px;
-            }
-            .mobile-calendar-weekday {
-                font-size: 0.82rem;
-                padding: 2px 0;
-            }
-            .mobile-calendar-cell,
-            .mobile-calendar-empty {
-                min-height: 44px;
-                border-radius: 8px;
-            }
-            .mobile-calendar-cell {
-                padding: 4px 1px;
-            }
-            .mobile-calendar-day {
-                font-size: 0.9rem;
-            }
-            .mobile-calendar-state {
-                font-size: 0.68rem;
-                letter-spacing: -0.02em;
-            }
-
             .mobile-legend {
                 grid-template-columns: repeat(2, minmax(0, 1fr));
                 gap: 6px;
@@ -195,12 +119,6 @@ def inject_mobile_css() -> None:
             div[data-testid="stDataEditor"] {
                 max-width: 100% !important;
             }
-        }
-
-
-        /* 週末(土・日)セルの強調(背景色は状態ごとの色を優先し、枠線のみ変える) */
-        .mobile-calendar-weekend {
-            border-color: #94a3b8 !important;
         }
 
         @media (max-width: 640px) {

@@ -16,9 +16,9 @@
 """
 import sys
 import html
-from urllib.parse import urlencode
 from datetime import date
 from pathlib import Path
+from typing import Dict
 
 import streamlit as st
 
@@ -52,17 +52,6 @@ if selected not in member_names:
     st.stop()
 
 year, month = config["year"], config["month"]
-
-# URLリンク型カレンダー用: ?set_day=YYYY-MM-DD が来たら状態を切り替えて、
-# すぐに通常URLへ戻す。st.columns/st.buttonを使わないため、スマホでも7列が崩れない。
-set_day = st.query_params.get("set_day")
-if set_day:
-    valid_days = {d.isoformat() for week in uc.month_weeks(year, month) for d in week if d is not None}
-    if set_day in valid_days:
-        ds.cycle_member_day_state(year, month, selected, set_day)
-    st.query_params.clear()
-    st.query_params["token"] = token
-    st.rerun()
 
 st.info(f"ログイン中: **{selected}** さん")
 
@@ -116,36 +105,124 @@ STATE_SHORT_LABEL = {
     ds.STATE_NIGHT_OFF: "▲夜",
 }
 
-# admin.py の外部バイト日カレンダーと同じ「HTML/CSSグリッド + <a>リンク」方式。
-# st.columns/st.buttonに依存しないため、スマホでの崩れ・クリック不安定・
-# 色付け(旧: aria-labelの文字列マッチ)が一切不要になり、確実に動作する。
-# クリック(タップ)は ?token=...&set_day=YYYY-MM-DD へのリンク遷移で、
-# ページ先頭のハンドラが状態を切り替えて即座に通常URLへ戻す。
-cal_html = ["<div class='mobile-calendar' aria-label='不都合日カレンダー'>"]
-for wd in uc.WEEKDAY_JA:
-    cal_html.append(f"<div class='mobile-calendar-weekday'>{html.escape(wd)}</div>")
+# --- カレンダー本体: st.button方式(Streamlit公式のwidgetイベント経路) ---
+#
+# 以前は <a href="?..."> のHTMLリンク方式にしていたが、スマホ(タッチ操作)で
+# タップしても反応しないことがあった。原因は主に2つ:
+#   1. st.navigation/st.Page環境では、同一オリジンの<a>タグのクリックが
+#      StreamlitフロントエンドのSPA的なルーティング処理に横取りされ、
+#      正規のwidgetイベント経路(WebSocket経由でPythonに通知→rerun)を
+#      通らない場合がある
+#   2. ':active { transform: scale(0.98) }' のCSSがタップ中に要素の見た目を
+#      変化させ、iOS Safari等がこれを「指が動いた=スクロール」と誤認識し、
+#      クリックイベント自体をキャンセルしてしまう(マウス操作では発生しない)
+#
+# そのため、このアプリの他の全ボタン(承認/却下ボタン等)と同じ、
+# 確実に動作するst.buttonに統一した。
+#
+# 色付けは、以前使っていた「aria-labelの文字列マッチ」(aria-labelは
+# デフォルトでは付与されず実質機能していなかった)ではなく、Streamlit公式の
+# 「keyを指定すると要素に `st-key-<key>` というCSSクラスが付与される」仕組み
+# (Streamlit 1.31以降)を使う。keyに状態を含めることで、状態ごとに確実な
+# CSSクラスで背景色を指定できる。
+#
+# CSSは st.container(key=...) でスコープを絞り、カレンダー以外のボタンに
+# 副作用が及ばないようにしている。
+CAL_CONTAINER_KEY = "unavail_calendar"
 
+css_rules = [
+    f"""
+    .st-key-{CAL_CONTAINER_KEY} [data-testid="stHorizontalBlock"] {{
+        display: flex !important;
+        flex-direction: row !important;
+        flex-wrap: nowrap !important;
+        gap: 4px !important;
+        width: 100% !important;
+        max-width: 100% !important;
+    }}
+    .st-key-{CAL_CONTAINER_KEY} [data-testid="stHorizontalBlock"] > div {{
+        min-width: 0 !important;
+        width: 14.2857% !important;
+        flex: 1 1 0 !important;
+    }}
+    .st-key-{CAL_CONTAINER_KEY} div.stButton > button {{
+        width: 100% !important;
+        min-width: 0 !important;
+        height: 3.2rem !important;
+        min-height: 3.2rem !important;
+        max-height: 3.2rem !important;
+        padding: 0.1rem 0.05rem !important;
+        white-space: pre-line !important;
+        line-height: 1.05 !important;
+        font-weight: 700 !important;
+        border-radius: 0.65rem !important;
+        border: 1px solid #cfd6e4 !important;
+        color: #1f2937 !important;
+        box-shadow: none !important;
+        overflow: hidden !important;
+        touch-action: manipulation;
+        -webkit-tap-highlight-color: rgba(0,0,0,0.08);
+    }}
+    .st-key-{CAL_CONTAINER_KEY} div.stButton > button:active {{
+        filter: brightness(0.94);
+    }}
+    .st-key-{CAL_CONTAINER_KEY} .cal-weekday {{
+        text-align: center;
+        font-weight: 700;
+        color: #4b5563;
+        font-size: 0.88rem;
+        padding: 0.15rem 0;
+    }}
+    .st-key-{CAL_CONTAINER_KEY} .cal-empty {{
+        height: 3.2rem;
+        border: 1px solid #e5e7eb;
+        border-radius: 0.65rem;
+        background: #f8fafc;
+        opacity: 0.5;
+    }}
+    """
+]
+
+day_keys: Dict[str, str] = {}
 for week in weeks:
     for d in week:
         if d is None:
-            cal_html.append("<div class='mobile-calendar-empty' aria-hidden='true'></div>")
             continue
         day_str = d.isoformat()
         state = ds.get_member_day_state(year, month, selected, day_str)
-        color = ds.STATE_COLOR[state]
-        short = STATE_SHORT_LABEL[state]
-        weekend_cls = " mobile-calendar-weekend" if uc.is_weekend(d) else ""
-        query = urlencode({"token": token, "set_day": day_str})
-        cal_html.append(
-            f"<a class='mobile-calendar-cell{weekend_cls}' href='?{query}' "
-            f"style='background-color:{color};' "
-            f"aria-label='{d.day}日 {html.escape(ds.STATE_LABEL[state])}'>"
-            f"<span><span class='mobile-calendar-day'>{d.day}</span>"
-            f"<span class='mobile-calendar-state'>{html.escape(short)}</span></span>"
-            "</a>"
+        cell_key = f"cal_{d.day:02d}_{state}"
+        day_keys[day_str] = cell_key
+        border_extra = "border-color:#94a3b8 !important;" if uc.is_weekend(d) else ""
+        css_rules.append(
+            f".st-key-{CAL_CONTAINER_KEY} .st-key-{cell_key} button "
+            f"{{ background-color: {ds.STATE_COLOR[state]} !important; {border_extra} }}"
         )
-cal_html.append("</div>")
-st.markdown("".join(cal_html), unsafe_allow_html=True)
+
+with st.container(key=CAL_CONTAINER_KEY):
+    st.markdown(f"<style>{''.join(css_rules)}</style>", unsafe_allow_html=True)
+
+    header_cols = st.columns(7, gap="small")
+    for col, wd in zip(header_cols, uc.WEEKDAY_JA):
+        col.markdown(f"<div class='cal-weekday'>{html.escape(wd)}</div>", unsafe_allow_html=True)
+
+    for week in weeks:
+        row_cols = st.columns(7, gap="small")
+        for col, d in zip(row_cols, week):
+            with col:
+                if d is None:
+                    st.markdown("<div class='cal-empty'></div>", unsafe_allow_html=True)
+                    continue
+                day_str = d.isoformat()
+                state = ds.get_member_day_state(year, month, selected, day_str)
+                label = f"{d.day}\n{STATE_SHORT_LABEL[state]}"
+                if st.button(
+                    label,
+                    key=day_keys[day_str],
+                    use_container_width=True,
+                    help=f"{d.day}日: {ds.STATE_LABEL[state]}",
+                ):
+                    ds.cycle_member_day_state(year, month, selected, day_str)
+                    st.rerun()
 
 st.caption("色で状態を判別できます。表示: ○=終日OK、×終=終日不可、▲昼=日中不可、▲夜=夜間不可")
 
