@@ -540,49 +540,6 @@ year, month = config["year"], config["month"]
 finalized_info = ds.get_finalized_info(year, month)
 
 
-def _render_schedule_calendar(entries: list, year: int, month: int) -> None:
-    """entries: [{"date": "YYYY-MM-DD", "day": 名前 or None, "night": 名前 or None, "gaikobu": 名前 or None}, ...]"""
-    by_day = {e["date"]: e for e in entries}
-    weeks = uc.month_weeks(year, month)
-
-    header_cols = st.columns(7)
-    for col, wd in zip(header_cols, uc.WEEKDAY_JA):
-        col.markdown(f"<div style='text-align:center;font-weight:bold'>{wd}</div>", unsafe_allow_html=True)
-
-    for week in weeks:
-        row_cols = st.columns(7)
-        for col, d in zip(row_cols, week):
-            with col:
-                if d is None:
-                    st.write("")
-                    continue
-                e = by_day.get(d.isoformat(), {})
-                day_name = e.get("day") or "-"
-                night_name = e.get("night") or "-"
-                gaikobu_name = e.get("gaikobu")
-                day_color = uc.member_color(day_name) if day_name != "-" else "#EEEEEE"
-                night_color = uc.member_color(night_name) if night_name != "-" else "#EEEEEE"
-                weekend_marker = " (土日)" if uc.is_weekend(d) else ""
-                gaikobu_html = ""
-                if gaikobu_name:
-                    gaikobu_color = uc.member_color(gaikobu_name)
-                    gaikobu_html = (
-                        f"<div style='background-color:{gaikobu_color};border-radius:4px;padding:2px;"
-                        f"font-size:0.8em;text-align:center'>🚑{gaikobu_name}</div>"
-                    )
-                st.markdown(
-                    f"""
-                    <div style='border:1px solid #ddd;border-radius:6px;padding:4px;margin-bottom:4px;'>
-                      <div style='font-size:0.75em;color:#555'>{d.day}{weekend_marker}</div>
-                      <div style='background-color:{day_color};border-radius:4px;padding:2px;margin:2px 0;font-size:0.8em;text-align:center'>☀️{day_name}</div>
-                      <div style='background-color:{night_color};border-radius:4px;padding:2px;font-size:0.8em;text-align:center'>🌙{night_name}</div>
-                      {gaikobu_html}
-                    </div>
-                    """,
-                    unsafe_allow_html=True,
-                )
-
-
 def _render_stats_table(stats: dict) -> None:
     stats_rows = [
         {
@@ -669,7 +626,7 @@ if finalized_info:
     snapshot = ds.load_schedule_snapshot(year, month)
     if snapshot:
         st.subheader("📅 予定勤務表(カレンダー表示)")
-        _render_schedule_calendar(snapshot["entries"], year, month)
+        uc.render_schedule_calendar(snapshot["entries"], year, month)
         st.subheader("📊 月間集計(予定ベース)")
         _render_stats_table(snapshot["stats"])
 
@@ -785,7 +742,7 @@ else:
                         st.write(f"- {w}")
 
             st.subheader("📅 勤務表(カレンダー表示・下書き)")
-            _render_schedule_calendar(display_entries, year, month)
+            uc.render_schedule_calendar(display_entries, year, month)
 
             st.subheader("📊 集計表")
             _render_stats_table(display_stats)
@@ -884,7 +841,7 @@ else:
         "独立して更新されます。年間集計・翌月以降の均等化には必ずこの実績が使われます。"
     )
     st.subheader("📅 実績勤務表(カレンダー表示)")
-    _render_schedule_calendar(actual_snapshot["entries"], year, month)
+    uc.render_schedule_calendar(actual_snapshot["entries"], year, month)
     st.subheader("📊 月間集計(実績ベース)")
     _render_stats_table(actual_snapshot["stats"])
 
