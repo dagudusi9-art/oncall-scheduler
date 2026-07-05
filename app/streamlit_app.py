@@ -154,7 +154,7 @@ PAGES_DIR = Path(__file__).resolve().parent / "pages"
 
 def home() -> None:
     st.title("🏥 オンコール自動割当システム")
-    st.caption("外科オンコール表の入力・自動作成システム")
+    st.caption("海軍病院のオンコール表の入力・自動作成システム")
 
     st.markdown(
         """

@@ -5,6 +5,10 @@
 - 名前選択やPINコードは廃止。代わりに、管理者が発行した専用URL
   (例: .../member_input?token=otani_1a2b3c4d5e6f)でアクセスすることで
   本人確認を行う。トークンを知っている人だけがこの画面に入力できる。
+- 初期表示は管理者が設定した対象年月だが、◀▶ボタンで表示月を
+  前後に切り替えられる(過去・未来の月も閲覧・修正できる)。
+  管理者設定の対象年月そのものは変更されず、あくまで「今このページで
+  どの月を見ているか」という表示上の状態(ブラウザのセッション内でのみ保持)
 - カレンダーが表示される
 - 各日をタップすると 「○(終日OK)→×(終日不可)→▲昼(日中不可)→▲夜(夜間不可)→○...」
   の順に状態が切り替わる(タップごとに自動保存)
@@ -62,15 +66,56 @@ if selected not in member_names:
     st.error("このURLに対応するメンバーが見つかりません。管理者にURLの再発行を依頼してください。")
     st.stop()
 
-year, month = config["year"], config["month"]
+admin_year, admin_month = config["year"], config["month"]
 
 st.info(f"ログイン中: **{selected}** さん")
 
+# --- 表示月の切り替え(初期値は管理者設定の対象年月。ここでの変更は
+#     このブラウザのセッション内だけの表示上の状態で、管理者設定や
+#     他メンバーの表示には影響しない) ---
+
+
+def _add_months(y: int, m: int, delta: int) -> tuple[int, int]:
+    idx = y * 12 + (m - 1) + delta
+    return idx // 12, idx % 12 + 1
+
+
+view_state_key = f"member_view_ym_{selected}"
+if view_state_key not in st.session_state:
+    st.session_state[view_state_key] = (admin_year, admin_month)
+
+nav_col1, nav_col2, nav_col3 = st.columns([1, 3, 1])
+with nav_col1:
+    if st.button("◀", key="view_month_prev", use_container_width=True):
+        cur_y, cur_m = st.session_state[view_state_key]
+        st.session_state[view_state_key] = _add_months(cur_y, cur_m, -1)
+        st.rerun()
+with nav_col2:
+    _vy, _vm = st.session_state[view_state_key]
+    st.markdown(
+        f"<div style='text-align:center; font-weight:700; font-size:1.1rem; padding-top:0.35rem;'>"
+        f"{_vy}年{_vm}月</div>",
+        unsafe_allow_html=True,
+    )
+with nav_col3:
+    if st.button("▶", key="view_month_next", use_container_width=True):
+        cur_y, cur_m = st.session_state[view_state_key]
+        st.session_state[view_state_key] = _add_months(cur_y, cur_m, 1)
+        st.rerun()
+
+year, month = st.session_state[view_state_key]
+
+if (year, month) != (admin_year, admin_month):
+    st.caption(f"📅 現在、{year}年{month}月を表示中です(入力対象月: {admin_year}年{admin_month}月)")
+    if st.button("入力対象月に戻る", use_container_width=True):
+        st.session_state[view_state_key] = (admin_year, admin_month)
+        st.rerun()
+
 st.subheader(f"{year}年{month}月 の不都合日")
 
-# --- 締切表示 ---
+# --- 締切表示(締切は入力対象月に対するものなので、対象月を表示中のときだけ出す) ---
 deadline = ds.get_deadline()
-if deadline:
+if deadline and (year, month) == (admin_year, admin_month):
     days_left = (deadline - date.today()).days
     if days_left < 0:
         st.error(f"⏰ 入力締切({deadline.month}月{deadline.day}日)は過ぎています。至急入力してください。")
@@ -80,6 +125,8 @@ if deadline:
         st.warning(f"⏰ 入力締切まであと{days_left}日です({deadline.month}月{deadline.day}日まで)。")
     else:
         st.info(f"⏰ 入力締切: {deadline.month}月{deadline.day}日(あと{days_left}日)")
+elif deadline:
+    st.caption(f"⏰ 入力締切({deadline.month}月{deadline.day}日)は入力対象月({admin_month}月分)のものです。")
 
 if ds.is_finalized(year, month):
     st.info("この月の勤務表は既に確定されています。修正が必要な場合は管理者に連絡してください。")
