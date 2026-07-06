@@ -801,6 +801,79 @@ def load_schedule_snapshot(year: int, month: int) -> Optional[dict]:
         return json.load(f)
 
 
+def update_schedule_entries(year: int, month: int, updated_entries: List[dict]) -> Optional[dict]:
+    """
+    予定勤務表(scheduled_assignments)の担当者を管理者が直接修正する。
+
+    updated_entries: [{"date": "YYYY-MM-DD", "day": 名前 or None,
+                        "night": 名前 or None, "gaikobu": 名前 or None}, ...]
+    既存スナップショットの entries を丸ごと置き換え、statsを再計算して保存する
+    (target/diffは既存statsの目標値を維持する)。
+    確定前・確定後のどちらでも呼び出せる。この関数はactual_assignmentsには
+    一切影響しない。
+    保存後のスナップショットを返す(該当月のスナップショットが無ければ None)。
+    """
+    snapshot = load_schedule_snapshot(year, month)
+    if snapshot is None:
+        return None
+    by_date = {e["date"]: e for e in updated_entries}
+    for e in snapshot["entries"]:
+        u = by_date.get(e["date"])
+        if u is not None:
+            e["day"] = u.get("day")
+            e["night"] = u.get("night")
+            e["gaikobu"] = u.get("gaikobu")
+    snapshot["stats"] = _recompute_actual_stats(snapshot)
+    save_schedule_snapshot(year, month, snapshot)
+    return snapshot
+
+
+def copy_schedule_to_actual(year: int, month: int) -> bool:
+    """
+    予定勤務表(scheduled_assignments)の現在の内容を、実績勤務表
+    (actual_assignments)へ上書きコピーする(管理者が明示的に実行した場合のみ)。
+    実績側のtarget(目標)は既存の実績statsの値を維持する。
+    成功したら True、コピー元の予定がまだ無ければ False を返す。
+    """
+    schedule_snapshot = load_schedule_snapshot(year, month)
+    if schedule_snapshot is None:
+        return False
+
+    actual_snapshot = load_actual_snapshot(year, month)
+    if actual_snapshot is None:
+        # 実績がまだ無い場合は、予定をそのままコピーして初期化する
+        save_actual_snapshot(year, month, schedule_snapshot)
+    else:
+        by_date = {e["date"]: e for e in schedule_snapshot["entries"]}
+        for e in actual_snapshot["entries"]:
+            u = by_date.get(e["date"])
+            if u is not None:
+                e["day"] = u.get("day")
+                e["night"] = u.get("night")
+                e["gaikobu"] = u.get("gaikobu")
+        actual_snapshot["stats"] = _recompute_actual_stats(actual_snapshot)
+        save_actual_snapshot(year, month, actual_snapshot)
+
+    from datetime import datetime as _dt
+
+    history = _load_actual_edit_history()
+    history.append(
+        {
+            "year": year,
+            "month": month,
+            "date": "(全日)",
+            "slot_type": "bulk_copy",
+            "old_member": None,
+            "new_member": None,
+            "reason": "予定を実績へ反映(一括コピー)",
+            "edited_by": "admin",
+            "edited_at": _dt.now().isoformat(),
+        }
+    )
+    _save_actual_edit_history(history)
+    return True
+
+
 # ----------------------------------------------------------------------
 # 外部病院バイト対象日
 # ----------------------------------------------------------------------

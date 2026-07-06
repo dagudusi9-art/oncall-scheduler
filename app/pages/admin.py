@@ -649,6 +649,171 @@ def _snapshot_to_result(snapshot: dict) -> ScheduleResult:
     )
 
 
+def _render_schedule_editor_section(year: int, month: int, section_key: str) -> None:
+    """予定勤務表(scheduled_assignments)を管理者が直接修正するための編集UI。
+
+    要件1: 確定前でも確定後でも編集可能。ここでの修正はactual_assignmentsには
+    一切影響しない。必要な場合のみ、下部の「予定を実績へ反映」ボタンで
+    actual_assignmentsへコピーできる。
+    """
+    editor_snapshot = ds.load_schedule_snapshot(year, month)
+    if editor_snapshot is None:
+        return
+
+    member_names_for_edit = [m["name"] for m in ds.get_members()]
+    slot_options = ["(未割当)"] + member_names_for_edit
+
+    st.subheader("✏️ 予定勤務表の修正")
+    st.caption(
+        "日付ごとに日中・夜間・外部バイトの担当者をプルダウンで直接修正できます。"
+        "保存すると予定ベースの月間集計が再計算されます。"
+        "この修正だけでは実績(actual_assignments)は変更されません。"
+    )
+
+    edit_rows = []
+    for e in editor_snapshot["entries"]:
+        d = datetime.strptime(e["date"], "%Y-%m-%d").date()
+        edit_rows.append(
+            {
+                "日付": f"{d.month}/{d.day}({uc.WEEKDAY_JA_BY_PYTHON_INDEX[d.weekday()]})",
+                "日中": e.get("day") or "(未割当)",
+                "夜間": e.get("night") or "(未割当)",
+                "外部バイト": e.get("gaikobu") or "(未割当)",
+            }
+        )
+    edit_df = pd.DataFrame(edit_rows)
+
+    with st.form(f"schedule_editor_form_{section_key}"):
+        edited_df = st.data_editor(
+            edit_df,
+            num_rows="fixed",
+            use_container_width=True,
+            disabled=["日付"],
+            column_config={
+                "日中": st.column_config.SelectboxColumn(options=slot_options, required=True),
+                "夜間": st.column_config.SelectboxColumn(options=slot_options, required=True),
+                "外部バイト": st.column_config.SelectboxColumn(options=slot_options, required=True),
+            },
+            key=f"schedule_editor_{section_key}",
+        )
+        save_submitted = st.form_submit_button("💾 予定勤務表を保存する")
+        if save_submitted:
+            updated_entries = []
+            for e, (_, row) in zip(editor_snapshot["entries"], edited_df.iterrows()):
+                updated_entries.append(
+                    {
+                        "date": e["date"],
+                        "day": None if row["日中"] == "(未割当)" else row["日中"],
+                        "night": None if row["夜間"] == "(未割当)" else row["夜間"],
+                        "gaikobu": None if row["外部バイト"] == "(未割当)" else row["外部バイト"],
+                    }
+                )
+            ds.update_schedule_entries(year, month, updated_entries)
+            # session側に古い最適化結果が残っていると、そちらが優先して表示されて
+            # 今回の保存内容が画面に反映されないため、破棄して保存済みスナップショット
+            # から再構築させる。
+            st.session_state.pop("schedule_result", None)
+            st.success("予定勤務表を保存しました。月間集計を再計算しました。")
+            st.rerun()
+
+    st.markdown("**🔁 予定を実績へ反映**")
+    st.caption(
+        "上記の予定の内容を、そのまま実績(actual_assignments)にも上書きコピーします。"
+        "実績側で既に行った個別の手動修正はコピー内容で上書きされるため、"
+        "必要な場合のみ実行してください。"
+    )
+    confirm_copy = st.checkbox(
+        "予定の内容で実績を上書きします。よろしいですか?", key=f"confirm_copy_to_actual_{section_key}"
+    )
+    if st.button("予定を実績へ反映する", key=f"copy_to_actual_{section_key}", disabled=not confirm_copy):
+        ok = ds.copy_schedule_to_actual(year, month)
+        if ok:
+            st.success("予定の内容を実績へ反映しました。")
+            st.rerun()
+        else:
+            st.error("反映に失敗しました(予定がまだ作成されていません)。")
+
+
+def _render_actual_editor_table(year: int, month: int) -> None:
+    """実績勤務表(actual_assignments)を管理者がまとめて修正するための編集UI。
+
+    要件2: カレンダー形式の一覧で、日付ごとに担当者をプルダウンで修正できる。
+    変更があった枠だけ、既存の ds.edit_actual_assignment() 経由で修正履歴に記録する。
+    """
+    actual_snapshot = ds.load_actual_snapshot(year, month)
+    if actual_snapshot is None:
+        return
+
+    member_names_for_edit = [m["name"] for m in ds.get_members()]
+    slot_options = ["(未割当)"] + member_names_for_edit
+
+    st.markdown("**📋 実績勤務表をまとめて修正**")
+    st.caption(
+        "日付ごとに日中・夜間・外部バイトの担当者をプルダウンでまとめて修正できます。"
+        "急な交代・病欠・LINE上での交代済み・外部バイトキャンセルなどをここでまとめて反映できます。"
+        "保存すると、変更があった枠だけ修正履歴に記録されます。"
+    )
+
+    rows = []
+    for e in actual_snapshot["entries"]:
+        d = datetime.strptime(e["date"], "%Y-%m-%d").date()
+        rows.append(
+            {
+                "日付": f"{d.month}/{d.day}({uc.WEEKDAY_JA_BY_PYTHON_INDEX[d.weekday()]})",
+                "日中": e.get("day") or "(未割当)",
+                "夜間": e.get("night") or "(未割当)",
+                "外部バイト": e.get("gaikobu") or "(未割当)",
+            }
+        )
+    df = pd.DataFrame(rows)
+
+    with st.form("actual_editor_table_form"):
+        edited = st.data_editor(
+            df,
+            num_rows="fixed",
+            use_container_width=True,
+            disabled=["日付"],
+            column_config={
+                "日中": st.column_config.SelectboxColumn(options=slot_options, required=True),
+                "夜間": st.column_config.SelectboxColumn(options=slot_options, required=True),
+                "外部バイト": st.column_config.SelectboxColumn(options=slot_options, required=True),
+            },
+            key="actual_editor_table",
+        )
+        reason_bulk = st.text_input(
+            "修正理由(まとめて修正する分・任意。空欄の場合は「管理者による一括修正」として記録されます)"
+        )
+        submitted = st.form_submit_button("💾 実績勤務表をまとめて保存する")
+        if submitted:
+            slot_key_map = {"日中": "day", "夜間": "night", "外部バイト": "gaikobu"}
+            reason_text = reason_bulk.strip() or "管理者による一括修正"
+            changed = 0
+            conflicts = []
+            for e, (_, row) in zip(actual_snapshot["entries"], edited.iterrows()):
+                for label, slot_type in slot_key_map.items():
+                    new_val = None if row[label] == "(未割当)" else row[label]
+                    old_val = e.get(slot_type)
+                    if new_val == old_val:
+                        continue
+                    success = ds.edit_actual_assignment(
+                        year, month, e["date"], slot_type, new_val, reason_text, edited_by="admin",
+                    )
+                    if success:
+                        changed += 1
+                        conflict = (
+                            ds.check_actual_conflict(year, month, e["date"], slot_type, new_val) if new_val else None
+                        )
+                        if conflict:
+                            conflicts.append(conflict)
+            if changed:
+                st.success(f"{changed}件の実績を修正しました")
+                for c in conflicts:
+                    st.warning(f"⚠️ 確認してください: {c}")
+            else:
+                st.info("変更はありませんでした")
+            st.rerun()
+
+
 def _get_export_extras(year: int, month: int):
     """Excel/PDF出力に添える実績・年間集計・交代履歴を取得する。"""
     actual_snapshot = ds.load_actual_snapshot(year, month)
@@ -672,6 +837,7 @@ if finalized_info:
         _render_schedule_calendar(snapshot["entries"], year, month)
         st.subheader("📊 月間集計(予定ベース)")
         _render_stats_table(snapshot["stats"])
+        _render_schedule_editor_section(year, month, "finalized")
 
     excel_path = _PROJECT_ROOT / "output" / f"schedule_{year}_{month:02d}.xlsx"
     pdf_path = _PROJECT_ROOT / "output" / f"schedule_{year}_{month:02d}.pdf"
@@ -789,6 +955,7 @@ else:
 
             st.subheader("📊 集計表")
             _render_stats_table(display_stats)
+            _render_schedule_editor_section(year, month, "draft")
 
             st.subheader("⬇️ Excel出力(下書き)")
             tmp_path = _PROJECT_ROOT / "output" / f"schedule_{year}_{month:02d}.xlsx"
@@ -888,7 +1055,9 @@ else:
     st.subheader("📊 月間集計(実績ベース)")
     _render_stats_table(actual_snapshot["stats"])
 
-    st.subheader("✏️ 実績の手動修正")
+    _render_actual_editor_table(year, month)
+
+    st.subheader("✏️ 実績の手動修正(1件ずつ)")
     st.caption(
         "急な交代・病欠・LINE上での交代済み・外部バイトキャンセルなど、"
         "個人間の交代機能を使わずに実績を直接修正したい場合はこちらを使ってください。"

@@ -299,41 +299,13 @@ if st.button("✅ 入力内容を確定する", type="primary"):
 
 st.caption("入力後、内容の変更が必要な場合は再度タップして状態を切り替えてください。このURLは毎月そのまま使えます。")
 
-st.divider()
-
-# ======================================================================
-# Googleスプレッドシートへの保存・読み込み(任意)
-# ======================================================================
-st.subheader("☁️ Googleスプレッドシートと同期")
-
-if not ssync.is_configured():
-    st.caption(
-        "Googleスプレッドシート連携は設定されていません。管理者画面から設定すると、"
-        "この場所で自分の入力内容を保存・読み込みできるようになります。"
-    )
-else:
-    sync_col1, sync_col2 = st.columns(2)
-    with sync_col1:
-        if st.button("💾 スプレッドシートに保存", use_container_width=True):
-            ok, message = ssync.save_member(year, month, selected)
-            (st.success if ok else st.error)(message)
-    with sync_col2:
-        if st.button("🔄 スプレッドシートから読み込む", use_container_width=True):
-            ok, message = ssync.load_member(year, month, selected)
-            if ok:
-                st.success(message)
-                st.rerun()
-            else:
-                st.error(message)
-
-    sync_times = ds.get_member_sheets_sync(year, month, selected)
-    if sync_times.get("saved") or sync_times.get("loaded"):
-        parts = []
-        if sync_times.get("saved"):
-            parts.append(f"保存: {_format_sync_time(sync_times['saved'])}")
-        if sync_times.get("loaded"):
-            parts.append(f"読み込み: {_format_sync_time(sync_times['loaded'])}")
-        st.caption("最終同期時刻 - " + " / ".join(parts))
+# ------------------------------------------------------------------
+# 「Googleスプレッドシートと同期」の手動ボタンはメンバー側には表示しない。
+# 「入力内容を確定する」を押した時点で(自動同期が有効な場合)既に
+# Googleスプレッドシートへ同期済みのため、メンバーが手動同期を意識する
+# 必要はない。最新状態が必要な場合は通常のページ再読み込みで対応する。
+# 手動同期ボタンは管理者画面(admin.py)のみに残している。
+# ------------------------------------------------------------------
 
 st.divider()
 
