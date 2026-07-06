@@ -28,11 +28,76 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.append(str(_PROJECT_ROOT))
 
 from src.models import Member, Unavailability  # noqa: E402
+import sheets_backend  # noqa: E402
 
 DATA_DIR = _PROJECT_ROOT / "data"
 DATA_DIR.mkdir(exist_ok=True)
 
 CONFIG_PATH = DATA_DIR / "config.json"
+
+# ----------------------------------------------------------------------
+# Googleスプレッドシートのシート(タブ)名
+#
+# app_config / members / tokens は sheets_backend.is_configured() の場合、
+# ローカルの data/*.json より常に優先して読み込まれる(Sheetsを正データとする)。
+# 「不都合日入力」は既存のシート名をそのまま使い、既存の運用データを保つ。
+# assignments / actual_assignments / app_state は生成・派生データの保存先で、
+# 年月やキーごとにJSON1行として保存する(人間が直接編集する想定ではない)。
+# ----------------------------------------------------------------------
+SHEET_APP_CONFIG = "app_config"
+SHEET_MEMBERS = "members"
+SHEET_UNAVAILABILITY = "不都合日入力"
+SHEET_ASSIGNMENTS = "assignments"
+SHEET_ACTUAL_ASSIGNMENTS = "actual_assignments"
+SHEET_APP_STATE = "app_state"
+
+MEMBERS_HEADER = [
+    "name",
+    "target_count",
+    "email",
+    "gaikobu_eligible",
+    "manual_target",
+    "absence_start",
+    "absence_end",
+]
+UNAVAILABILITY_HEADER = ["member_name", "date", "day_unavailable", "night_unavailable"]
+
+
+def _write_local_json(path: Path, data) -> None:
+    with path.open("w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+def _read_local_json(path: Path, default):
+    if not path.exists():
+        return default
+    with path.open("r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def _state_load(key: str, local_path: Path, default):
+    """app_state シートからキーで読み込み、成功したらローカルにもキャッシュする。
+    Sheets未設定・読み込み失敗時はローカルキャッシュにフォールバックする。"""
+    if sheets_backend.is_configured():
+        remote = sheets_backend.read_blob(SHEET_APP_STATE, key)
+        if remote is not None:
+            _write_local_json(local_path, remote)
+            return remote
+    return _read_local_json(local_path, default)
+
+
+def _state_save(key: str, local_path: Path, data) -> None:
+    """ローカルへは必ず保存し、Sheetsへの反映はbest-effortで行う。"""
+    _write_local_json(local_path, data)
+    if sheets_backend.is_configured():
+        sheets_backend.write_blob(SHEET_APP_STATE, key, data)
+
+
+def _state_clear(key: str, local_path: Path) -> None:
+    if local_path.exists():
+        local_path.unlink()
+    if sheets_backend.is_configured():
+        sheets_backend.delete_blob(SHEET_APP_STATE, key)
 
 # 状態の定義(メンバー入力画面でワンタップで巡回させる4状態)
 STATE_OK = "ok"  # 終日OK
@@ -79,10 +144,76 @@ DEFAULT_CONFIG = {
 }
 
 
+def _member_row_to_dict(row: dict) -> dict:
+    def _flag(v) -> bool:
+        return str(v).strip().lower() in ("1", "true", "yes")
+
+    return {
+        "name": str(row.get("name", "")).strip(),
+        "target_count": int(row["target_count"]) if str(row.get("target_count", "")).strip() else 0,
+        "email": str(row.get("email", "") or ""),
+        "gaikobu_eligible": _flag(row.get("gaikobu_eligible", "")),
+        "manual_target": _flag(row.get("manual_target", "")),
+        "absence_start": str(row.get("absence_start") or "") or None,
+        "absence_end": str(row.get("absence_end") or "") or None,
+    }
+
+
+def _fetch_remote_config() -> Optional[dict]:
+    """app_config / members シートから設定を組み立てる。
+    どちらかの読み込みに失敗した場合はNoneを返す(呼び出し側でローカルに
+    フォールバックする)。"""
+    if not sheets_backend.is_configured():
+        return None
+    kv = sheets_backend.read_kv(SHEET_APP_CONFIG)
+    members_rows = sheets_backend.read_table(SHEET_MEMBERS)
+    if kv is None or members_rows is None:
+        return None
+
+    config = dict(DEFAULT_CONFIG)
+    if kv.get("year", "").strip():
+        config["year"] = int(kv["year"])
+    if kv.get("month", "").strip():
+        config["month"] = int(kv["month"])
+    config["submission_deadline"] = kv.get("submission_deadline") or None
+    config["auto_sync_sheets"] = kv.get("auto_sync_sheets", "").strip().lower() == "true"
+    config["sheets_spreadsheet_key"] = kv.get("sheets_spreadsheet_key", "")
+    config["members"] = [_member_row_to_dict(r) for r in members_rows if str(r.get("name", "")).strip()]
+    return config
+
+
+def _push_config_to_sheets(config: dict) -> None:
+    """best-effort。失敗してもローカル保存済みのため呼び出し側は落とさない。"""
+    if not sheets_backend.is_configured():
+        return
+    kv = {
+        "year": config.get("year"),
+        "month": config.get("month"),
+        "submission_deadline": config.get("submission_deadline") or "",
+        "auto_sync_sheets": bool(config.get("auto_sync_sheets", False)),
+        "sheets_spreadsheet_key": config.get("sheets_spreadsheet_key", ""),
+    }
+    sheets_backend.write_kv(SHEET_APP_CONFIG, kv)
+    sheets_backend.write_table(SHEET_MEMBERS, MEMBERS_HEADER, config.get("members", []))
+    # 管理者画面でst.secrets未設定のままスプレッドシートIDを入力した場合でも、
+    # 次回起動までは接続を維持できるようにローカルにもキャッシュしておく。
+    key = config.get("sheets_spreadsheet_key", "")
+    if key:
+        sheets_backend.cache_spreadsheet_key_locally(key)
+
+
 def load_config() -> dict:
+    remote = _fetch_remote_config()
+    if remote is not None:
+        _write_local_json(CONFIG_PATH, remote)
+        return remote
+
+    # Sheets未設定、または読み込み失敗時はローカルキャッシュを使う
+    # (ローカル開発時やCloudでの一時的な接続断への対応)
     if not CONFIG_PATH.exists():
-        save_config(DEFAULT_CONFIG)
-        return dict(DEFAULT_CONFIG)
+        config = dict(DEFAULT_CONFIG)
+        _write_local_json(CONFIG_PATH, config)
+        return config
     with CONFIG_PATH.open("r", encoding="utf-8") as f:
         config = json.load(f)
     # 旧バージョンのconfig.jsonに無いキーはデフォルト値で補完する(後方互換性)
@@ -92,13 +223,15 @@ def load_config() -> dict:
             config[key] = value
             changed = True
     if changed:
-        save_config(config)
+        _write_local_json(CONFIG_PATH, config)
     return config
 
 
 def save_config(config: dict) -> None:
-    with CONFIG_PATH.open("w", encoding="utf-8") as f:
-        json.dump(config, f, ensure_ascii=False, indent=2)
+    """ローカルには必ず保存し(高速なキャッシュ・オフライン用)、
+    Google Sheetsが設定されていればそちらにも反映する(正データ)。"""
+    _write_local_json(CONFIG_PATH, config)
+    _push_config_to_sheets(config)
 
 
 def get_members() -> List[dict]:
@@ -311,7 +444,59 @@ def get_members_as_models() -> List[Member]:
 # 不都合日データ
 # ----------------------------------------------------------------------
 
+def _fetch_remote_unavailability(year: int, month: int) -> Optional[Dict[str, Dict[str, dict]]]:
+    """「不都合日入力」シートから対象年月の行だけを抜き出して組み立てる。
+    シート自体には複数月のデータが混在してよい(dateで判別するため)。"""
+    if not sheets_backend.is_configured():
+        return None
+    rows = sheets_backend.read_table(SHEET_UNAVAILABILITY)
+    if rows is None:
+        return None
+
+    prefix = f"{year:04d}-{month:02d}-"
+    result: Dict[str, Dict[str, dict]] = {}
+    for r in rows:
+        date_str = str(r.get("date", ""))
+        if not date_str.startswith(prefix):
+            continue
+        member_name = str(r.get("member_name", "")).strip()
+        if not member_name:
+            continue
+        d = str(r.get("day_unavailable", "")).strip().lower() in ("1", "true")
+        n = str(r.get("night_unavailable", "")).strip().lower() in ("1", "true")
+        if d or n:
+            result.setdefault(member_name, {})[date_str] = {"day": d, "night": n}
+    return result
+
+
+def _push_unavailability_to_sheets(year: int, month: int, data: Dict[str, Dict[str, dict]]) -> None:
+    """対象年月の行だけを入れ替える(他の月・他メンバーの行はそのまま残す)。"""
+    if not sheets_backend.is_configured():
+        return
+    existing = sheets_backend.read_table(SHEET_UNAVAILABILITY)
+    if existing is None:
+        existing = []
+    prefix = f"{year:04d}-{month:02d}-"
+    kept = [r for r in existing if not str(r.get("date", "")).startswith(prefix)]
+    new_rows = [
+        {
+            "member_name": member_name,
+            "date": day_str,
+            "day_unavailable": int(bool(flags.get("day", False))),
+            "night_unavailable": int(bool(flags.get("night", False))),
+        }
+        for member_name, days in data.items()
+        for day_str, flags in days.items()
+    ]
+    sheets_backend.write_table(SHEET_UNAVAILABILITY, UNAVAILABILITY_HEADER, kept + new_rows)
+
+
 def load_unavailability_raw(year: int, month: int) -> Dict[str, Dict[str, dict]]:
+    remote = _fetch_remote_unavailability(year, month)
+    if remote is not None:
+        _write_local_json(_unavailability_path(year, month), remote)
+        return remote
+
     path = _unavailability_path(year, month)
     if not path.exists():
         return {}
@@ -320,9 +505,8 @@ def load_unavailability_raw(year: int, month: int) -> Dict[str, Dict[str, dict]]
 
 
 def save_unavailability_raw(year: int, month: int, data: Dict[str, Dict[str, dict]]) -> None:
-    path = _unavailability_path(year, month)
-    with path.open("w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    _write_local_json(_unavailability_path(year, month), data)
+    _push_unavailability_to_sheets(year, month, data)
 
 
 def get_member_day_state(year: int, month: int, member_name: str, day_str: str) -> str:
@@ -441,23 +625,15 @@ def _last_updated_path(year: int, month: int) -> Path:
 def touch_last_updated(year: int, month: int, member_name: str) -> None:
     from datetime import datetime as _dt
 
-    path = _last_updated_path(year, month)
-    data = {}
-    if path.exists():
-        with path.open("r", encoding="utf-8") as f:
-            data = json.load(f)
+    key = f"last_updated_{_month_key(year, month)}"
+    data = _state_load(key, _last_updated_path(year, month), {})
     data[member_name] = _dt.now().isoformat()
-    with path.open("w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    _state_save(key, _last_updated_path(year, month), data)
 
 
 def get_last_updated(year: int, month: int) -> Dict[str, str]:
     """{名前: ISO形式のタイムスタンプ文字列} を返す"""
-    path = _last_updated_path(year, month)
-    if not path.exists():
-        return {}
-    with path.open("r", encoding="utf-8") as f:
-        return json.load(f)
+    return _state_load(f"last_updated_{_month_key(year, month)}", _last_updated_path(year, month), {})
 
 
 # ----------------------------------------------------------------------
@@ -470,20 +646,16 @@ def _sheets_sync_path(year: int, month: int) -> Path:
 
 
 def _load_sheets_sync(year: int, month: int) -> dict:
-    path = _sheets_sync_path(year, month)
-    if not path.exists():
-        return {"members": {}, "admin": {}}
-    with path.open("r", encoding="utf-8") as f:
-        data = json.load(f)
+    data = _state_load(
+        f"sheets_sync_{_month_key(year, month)}", _sheets_sync_path(year, month), {"members": {}, "admin": {}}
+    )
     data.setdefault("members", {})
     data.setdefault("admin", {})
     return data
 
 
 def _save_sheets_sync(year: int, month: int, data: dict) -> None:
-    path = _sheets_sync_path(year, month)
-    with path.open("w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    _state_save(f"sheets_sync_{_month_key(year, month)}", _sheets_sync_path(year, month), data)
 
 
 def set_member_sheets_sync(year: int, month: int, member_name: str, kind: str) -> None:
@@ -576,9 +748,11 @@ def mark_finalized(year: int, month: int) -> None:
     """
     from datetime import datetime as _dt
 
-    path = _finalized_path(year, month)
-    with path.open("w", encoding="utf-8") as f:
-        json.dump({"finalized_at": _dt.now().isoformat()}, f, ensure_ascii=False, indent=2)
+    _state_save(
+        f"finalized_{_month_key(year, month)}",
+        _finalized_path(year, month),
+        {"finalized_at": _dt.now().isoformat()},
+    )
 
     if load_actual_snapshot(year, month) is None:
         scheduled = load_schedule_snapshot(year, month)
@@ -586,22 +760,16 @@ def mark_finalized(year: int, month: int) -> None:
             save_actual_snapshot(year, month, scheduled)
 
 
-def is_finalized(year: int, month: int) -> bool:
-    return _finalized_path(year, month).exists()
-
-
 def get_finalized_info(year: int, month: int) -> Optional[dict]:
-    path = _finalized_path(year, month)
-    if not path.exists():
-        return None
-    with path.open("r", encoding="utf-8") as f:
-        return json.load(f)
+    return _state_load(f"finalized_{_month_key(year, month)}", _finalized_path(year, month), None)
+
+
+def is_finalized(year: int, month: int) -> bool:
+    return get_finalized_info(year, month) is not None
 
 
 def clear_finalized(year: int, month: int) -> None:
-    path = _finalized_path(year, month)
-    if path.exists():
-        path.unlink()
+    _state_clear(f"finalized_{_month_key(year, month)}", _finalized_path(year, month))
 
 
 # ----------------------------------------------------------------------
@@ -614,12 +782,18 @@ def _schedule_snapshot_path(year: int, month: int) -> Path:
 
 
 def save_schedule_snapshot(year: int, month: int, snapshot: dict) -> None:
-    path = _schedule_snapshot_path(year, month)
-    with path.open("w", encoding="utf-8") as f:
-        json.dump(snapshot, f, ensure_ascii=False, indent=2)
+    _write_local_json(_schedule_snapshot_path(year, month), snapshot)
+    if sheets_backend.is_configured():
+        sheets_backend.write_blob(SHEET_ASSIGNMENTS, _month_key(year, month), snapshot)
 
 
 def load_schedule_snapshot(year: int, month: int) -> Optional[dict]:
+    if sheets_backend.is_configured():
+        remote = sheets_backend.read_blob(SHEET_ASSIGNMENTS, _month_key(year, month))
+        if remote is not None:
+            _write_local_json(_schedule_snapshot_path(year, month), remote)
+            return remote
+
     path = _schedule_snapshot_path(year, month)
     if not path.exists():
         return None
@@ -637,17 +811,15 @@ def _gaikobu_days_path(year: int, month: int) -> Path:
 
 def get_gaikobu_days(year: int, month: int) -> List[str]:
     """'YYYY-MM-DD' 形式の文字列リストを返す"""
-    path = _gaikobu_days_path(year, month)
-    if not path.exists():
-        return []
-    with path.open("r", encoding="utf-8") as f:
-        return json.load(f)
+    return _state_load(f"gaikobu_days_{_month_key(year, month)}", _gaikobu_days_path(year, month), [])
 
 
 def set_gaikobu_days(year: int, month: int, day_strs: List[str]) -> None:
-    path = _gaikobu_days_path(year, month)
-    with path.open("w", encoding="utf-8") as f:
-        json.dump(sorted(set(day_strs)), f, ensure_ascii=False, indent=2)
+    _state_save(
+        f"gaikobu_days_{_month_key(year, month)}",
+        _gaikobu_days_path(year, month),
+        sorted(set(day_strs)),
+    )
 
 
 def toggle_gaikobu_day(year: int, month: int, day_str: str) -> bool:
@@ -682,12 +854,18 @@ def _actual_snapshot_path(year: int, month: int) -> Path:
 
 
 def save_actual_snapshot(year: int, month: int, snapshot: dict) -> None:
-    path = _actual_snapshot_path(year, month)
-    with path.open("w", encoding="utf-8") as f:
-        json.dump(snapshot, f, ensure_ascii=False, indent=2)
+    _write_local_json(_actual_snapshot_path(year, month), snapshot)
+    if sheets_backend.is_configured():
+        sheets_backend.write_blob(SHEET_ACTUAL_ASSIGNMENTS, _month_key(year, month), snapshot)
 
 
 def load_actual_snapshot(year: int, month: int) -> Optional[dict]:
+    if sheets_backend.is_configured():
+        remote = sheets_backend.read_blob(SHEET_ACTUAL_ASSIGNMENTS, _month_key(year, month))
+        if remote is not None:
+            _write_local_json(_actual_snapshot_path(year, month), remote)
+            return remote
+
     path = _actual_snapshot_path(year, month)
     if not path.exists():
         return None
@@ -794,15 +972,11 @@ SLOT_TYPE_LABEL = {"day": "日中", "night": "夜間", "gaikobu": "外部バイ�
 
 
 def _load_actual_edit_history() -> List[dict]:
-    if not _ACTUAL_EDIT_HISTORY_PATH.exists():
-        return []
-    with _ACTUAL_EDIT_HISTORY_PATH.open("r", encoding="utf-8") as f:
-        return json.load(f)
+    return _state_load("actual_edit_history", _ACTUAL_EDIT_HISTORY_PATH, [])
 
 
 def _save_actual_edit_history(records: List[dict]) -> None:
-    with _ACTUAL_EDIT_HISTORY_PATH.open("w", encoding="utf-8") as f:
-        json.dump(records, f, ensure_ascii=False, indent=2)
+    _state_save("actual_edit_history", _ACTUAL_EDIT_HISTORY_PATH, records)
 
 
 def edit_actual_assignment(
@@ -870,15 +1044,11 @@ SWAP_STATUS_LABEL = {
 
 
 def _load_swap_requests() -> List[dict]:
-    if not _SWAP_REQUESTS_PATH.exists():
-        return []
-    with _SWAP_REQUESTS_PATH.open("r", encoding="utf-8") as f:
-        return json.load(f)
+    return _state_load("swap_requests", _SWAP_REQUESTS_PATH, [])
 
 
 def _save_swap_requests(records: List[dict]) -> None:
-    with _SWAP_REQUESTS_PATH.open("w", encoding="utf-8") as f:
-        json.dump(records, f, ensure_ascii=False, indent=2)
+    _state_save("swap_requests", _SWAP_REQUESTS_PATH, records)
 
 
 def create_swap_request(
@@ -997,27 +1167,25 @@ def mark_actual_finalized(year: int, month: int) -> None:
     """
     from datetime import datetime as _dt
 
-    path = _actual_finalized_path(year, month)
-    with path.open("w", encoding="utf-8") as f:
-        json.dump({"actual_finalized_at": _dt.now().isoformat()}, f, ensure_ascii=False, indent=2)
-
-
-def is_actual_finalized(year: int, month: int) -> bool:
-    return _actual_finalized_path(year, month).exists()
+    _state_save(
+        f"actual_finalized_{_month_key(year, month)}",
+        _actual_finalized_path(year, month),
+        {"actual_finalized_at": _dt.now().isoformat()},
+    )
 
 
 def get_actual_finalized_info(year: int, month: int) -> Optional[dict]:
-    path = _actual_finalized_path(year, month)
-    if not path.exists():
-        return None
-    with path.open("r", encoding="utf-8") as f:
-        return json.load(f)
+    return _state_load(
+        f"actual_finalized_{_month_key(year, month)}", _actual_finalized_path(year, month), None
+    )
+
+
+def is_actual_finalized(year: int, month: int) -> bool:
+    return get_actual_finalized_info(year, month) is not None
 
 
 def clear_actual_finalized(year: int, month: int) -> None:
-    path = _actual_finalized_path(year, month)
-    if path.exists():
-        path.unlink()
+    _state_clear(f"actual_finalized_{_month_key(year, month)}", _actual_finalized_path(year, month))
 
 
 def get_annual_actual_totals(year: int, upto_month: int = 12) -> Dict[str, Dict[str, int]]:

@@ -338,11 +338,38 @@ else:
 st.divider()
 
 # ======================================================================
+# 全体勤務表(閲覧専用)
+# ======================================================================
+st.header("🗂️ 全体勤務表(閲覧専用)")
+
+scheduled_snapshot = ds.load_schedule_snapshot(year, month)
+
+if scheduled_snapshot:
+    from datetime import datetime as _dt
+
+    overview_rows = []
+    for e in scheduled_snapshot["entries"]:
+        d = _dt.strptime(e["date"], "%Y-%m-%d").date()
+        overview_rows.append(
+            {
+                "日付": f"{d.month}/{d.day}({uc.WEEKDAY_JA_BY_PYTHON_INDEX[d.weekday()]})",
+                "日中": e.get("day") or "-",
+                "夜間": e.get("night") or "-",
+                "外部バイト": e.get("gaikobu") or "-",
+            }
+        )
+    st.dataframe(overview_rows, use_container_width=True, hide_index=True)
+    st.caption("表示のみです。予定の変更が必要な場合は管理者にご連絡ください。")
+else:
+    st.caption("まだこの月の勤務表は確定されていません。")
+
+st.divider()
+
+# ======================================================================
 # 自分の予定勤務・実績勤務
 # ======================================================================
 st.header("📋 自分の勤務(予定・実績)")
 
-scheduled_snapshot = ds.load_schedule_snapshot(year, month)
 actual_snapshot = ds.load_actual_snapshot(year, month)
 
 

@@ -23,6 +23,7 @@ for _p in (_APP_DIR, _PROJECT_ROOT):
         sys.path.append(str(_p))
 
 import data_store as ds  # noqa: E402
+import sheets_backend  # noqa: E402
 
 CREDENTIALS_PATH = _PROJECT_ROOT / "credentials" / "service_account.json"
 
@@ -66,6 +67,15 @@ def is_configured() -> bool:
 
 
 def get_spreadsheet_key() -> str:
+    """スプレッドシートIDを解決する。
+
+    sheets_backend.get_spreadsheet_key()(st.secrets優先、次にローカル
+    キャッシュ)を第一候補とし、そこで解決できない場合のみ、管理者が
+    admin.py で入力したdata_store側の設定値にフォールバックする。
+    """
+    key = sheets_backend.get_spreadsheet_key()
+    if key:
+        return key
     return str(ds.get_auto_sync_settings().get("spreadsheet_key", "") or "")
 
 
