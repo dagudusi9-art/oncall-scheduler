@@ -1216,3 +1216,26 @@ else:
         ds.mark_actual_finalized(year, month)
         st.success("この月の実績を確定しました。年間実績集計に反映されます。")
         st.rerun()
+
+st.divider()
+
+# ======================================================================
+# 12. 管理者パスワード変更
+# ======================================================================
+st.header("12. 管理者パスワード変更")
+
+with st.form("change_admin_password_form", clear_on_submit=True):
+    current_pw = st.text_input("現在の管理者パスワード", type="password")
+    new_pw1 = st.text_input("新しい管理者パスワード", type="password")
+    new_pw2 = st.text_input("新しい管理者パスワード(確認)", type="password")
+    change_submitted = st.form_submit_button("パスワードを変更する")
+    if change_submitted:
+        if not auth.check_admin_password(current_pw):
+            st.error("現在のパスワードが違います")
+        elif not new_pw1:
+            st.error("新しいパスワードを入力してください")
+        elif new_pw1 != new_pw2:
+            st.error("新しいパスワードが一致しません")
+        else:
+            auth.set_admin_password(new_pw1)
+            st.success("管理者パスワードを変更しました")
