@@ -233,14 +233,24 @@ class OnCallOptimizer:
                 window = self.days[i : i + 5]
                 model.Add(sum(assigned_on_day[(d, name)] for d in window) <= 4)
 
-        # --- 絶対条件⑧ Night Callの翌日は完全休み(Day Call/Night Callともに不可) ---
+        # --- 絶対条件⑧ Night Callの翌日の制約 ---
+        # ・翌日のDay Callは曜日を問わず常に不可。
+        # ・翌日のNight Callは原則不可だが、土曜Nightのみ例外的に翌日(日曜)のNight Callを許可する
+        #   (土曜Night→日曜Nightのみ連続可。日曜Nightの翌日(月曜)は通常どおり完全休み)。
+        # ・祝日は考慮せず、曜日のみで判定する(月〜金は平日扱い)。
         for i in range(len(self.days) - 1):
             d_today = self.days[i]
             d_tomorrow = self.days[i + 1]
             for name in self.member_names:
+                # Day Callは曜日を問わず常に不可
                 model.Add(
-                    self.x[(d_today, Slot.NIGHT, name)] + assigned_on_day[(d_tomorrow, name)] <= 1
+                    self.x[(d_today, Slot.NIGHT, name)] + self.x[(d_tomorrow, Slot.DAY, name)] <= 1
                 )
+                # Night Callは原則不可(土曜Nightのみ例外)
+                if d_today.weekday() != 5:  # 5 = 土曜
+                    model.Add(
+                        self.x[(d_today, Slot.NIGHT, name)] + self.x[(d_tomorrow, Slot.NIGHT, name)] <= 1
+                    )
 
         # --- 絶対条件⑨ 3日以上連続でCallに入った場合、その直後は2日連続OFF必須 ---
         # 「d-2, d-1, d」の3日連続でCallに入り、かつ d+1 が(既に)OFFであれば、
