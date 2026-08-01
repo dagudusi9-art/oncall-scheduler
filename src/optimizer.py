@@ -217,6 +217,52 @@ class OnCallOptimizer:
             if (fd, fslot, fname) in self.x:
                 model.Add(self.x[(fd, fslot, fname)] == 1)
 
+        # 「その日に(日中/夜間どちらかで)割り当てられているか」を表すBool変数。
+        # (同日の日中・夜間は排他なので0/1で表現できる。絶対条件⑦⑧⑨とソフトEの両方で使う)
+        assigned_on_day: Dict[Tuple, cp_model.IntVar] = {}
+        for d in self.days:
+            for name in self.member_names:
+                var = model.NewBoolVar(f"assigned_{d.isoformat()}_{name}")
+                model.Add(var == self.x[(d, Slot.DAY, name)] + self.x[(d, Slot.NIGHT, name)])
+                assigned_on_day[(d, name)] = var
+
+        # --- 絶対条件⑦ 4日(Day/Night問わず)を超えて連続でCallに入れない ---
+        # 任意の連続5日間の合計が4以下であれば、5日連続でCallに入ることはない。
+        for name in self.member_names:
+            for i in range(len(self.days) - 4):
+                window = self.days[i : i + 5]
+                model.Add(sum(assigned_on_day[(d, name)] for d in window) <= 4)
+
+        # --- 絶対条件⑧ Night Callの翌日は完全休み(Day Call/Night Callともに不可) ---
+        for i in range(len(self.days) - 1):
+            d_today = self.days[i]
+            d_tomorrow = self.days[i + 1]
+            for name in self.member_names:
+                model.Add(
+                    self.x[(d_today, Slot.NIGHT, name)] + assigned_on_day[(d_tomorrow, name)] <= 1
+                )
+
+        # --- 絶対条件⑨ 3日以上連続でCallに入った場合、その直後は2日連続OFF必須 ---
+        # 「d-2, d-1, d」の3日連続でCallに入り、かつ d+1 が(既に)OFFであれば、
+        # そこが連続勤務の切れ目(3日以上の連続)にあたるため、続く d+2 もOFFを強制する
+        # (d+1は条件の一部として既にOFF、d+2を追加でOFFにすることで2連休が成立する)。
+        # 4日連続の場合も、末尾の3日分がこの条件に該当するため同様に2連休が強制される。
+        for i in range(2, len(self.days) - 2):
+            d_m2 = self.days[i - 2]
+            d_m1 = self.days[i - 1]
+            d = self.days[i]
+            d_p1 = self.days[i + 1]
+            d_p2 = self.days[i + 2]
+            for name in self.member_names:
+                model.Add(assigned_on_day[(d_p2, name)] == 0).OnlyEnforceIf(
+                    [
+                        assigned_on_day[(d_m2, name)],
+                        assigned_on_day[(d_m1, name)],
+                        assigned_on_day[(d, name)],
+                        assigned_on_day[(d_p1, name)].Not(),
+                    ]
+                )
+
         penalty_terms: List[cp_model.LinearExpr] = []
         w = self.options.weights
 
@@ -279,15 +325,7 @@ class OnCallOptimizer:
                 penalty_terms.append(consec * w.consecutive_shift)
 
         # --- ソフトE: 勤務日の偏り(近接日への集中)を避ける ---
-        # まず「その日に(日中/夜間どちらかで)割り当てられているか」を表す
-        # Bool変数を用意する(同日の日中・夜間は排他なので0/1で表現できる)。
-        assigned_on_day: Dict[Tuple, cp_model.IntVar] = {}
-        for d in self.days:
-            for name in self.member_names:
-                var = model.NewBoolVar(f"assigned_{d.isoformat()}_{name}")
-                model.Add(var == self.x[(d, Slot.DAY, name)] + self.x[(d, Slot.NIGHT, name)])
-                assigned_on_day[(d, name)] = var
-
+        # assigned_on_day は絶対条件⑦⑧⑨のところで既に構築済みのものを利用する。
         # 同じ人が近い日(3日以内)に複数回入るとペナルティを与える(ペアごとに判定)
         window = 3
         for name in self.member_names:
