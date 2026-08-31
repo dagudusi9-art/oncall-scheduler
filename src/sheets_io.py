@@ -139,12 +139,21 @@ class SheetsClient:
         worksheet_name: str = "不都合日入力",
     ) -> None:
         """
+        [非推奨・Webアプリからは呼ばれていません]
         Webアプリの不都合日データ(ロング形式)をスプレッドシートへ書き込む。
         渡された unavailabilities がその時点の全メンバー分のデータであることを
         前提に、シート全体を上書きする(管理者による一括保存用)。
 
         複数人が同時に入力している状況で1人分だけを保存したい場合は
         write_unavailability_for_member() を使うこと。
+
+        注意: このメソッドは ws.clear() でシート全体を消去してから書き戻すため、
+        同時に他のユーザーが保存すると互いのデータを消してしまう事故が
+        過去に発生した。現在Webアプリ(app/pages/member_input.py,
+        app/pages/admin.py)は不都合日の保存にこのメソッドを使わず、
+        app/data_store.py の save_member_unavailability()(v2シートへの
+        安全なmember×year_month単位のupsert)を使っている。CLIツール等から
+        意図的に使う場合を除き、新規の呼び出しを追加しないこと。
         """
         ws = self._get_or_create_worksheet(worksheet_name)
         ws.clear()
@@ -162,12 +171,15 @@ class SheetsClient:
         worksheet_name: str = "不都合日入力",
     ) -> None:
         """
+        [非推奨・Webアプリからは呼ばれていません]
         1名分の不都合日データだけをスプレッドシートに反映する。
 
         シート上の他メンバーの行はそのまま残し、member_name の行だけを
         削除してから渡された unavailabilities で置き換える。
-        複数の医師が同時期にそれぞれ自分の入力を保存する運用でも、
-        互いのデータを消してしまわないようにするための書き込み方法。
+
+        注意: このメソッドも内部で ws.clear() を使い、読み込みと書き込みの
+        間に他ユーザーが保存すると競合しうる。現在Webアプリはこのメソッドを
+        使わず、app/data_store.py の save_member_unavailability() を使う。
         """
         ws = self._get_or_create_worksheet(worksheet_name)
         existing_records = ws.get_all_records()

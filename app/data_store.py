@@ -19,7 +19,7 @@ from __future__ import annotations
 import json
 from datetime import date
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import sys
 
@@ -40,13 +40,17 @@ CONFIG_PATH = DATA_DIR / "config.json"
 #
 # app_config / members / tokens は sheets_backend.is_configured() の場合、
 # ローカルの data/*.json より常に優先して読み込まれる(Sheetsを正データとする)。
-# 「不都合日入力」は既存のシート名をそのまま使い、既存の運用データを保つ。
+# 「不都合日入力」は旧形式(1日1行)のシート。過去データのバックアップ・
+# 後方互換読み込み専用として残し、このシートへは二度と書き込まない。
+# 新しい保存方式は「不都合日入力_v2」(1行=1メンバー×1ヶ月)を使う。
 # assignments / actual_assignments / app_state は生成・派生データの保存先で、
 # 年月やキーごとにJSON1行として保存する(人間が直接編集する想定ではない)。
 # ----------------------------------------------------------------------
 SHEET_APP_CONFIG = "app_config"
 SHEET_MEMBERS = "members"
-SHEET_UNAVAILABILITY = "不都合日入力"
+SHEET_UNAVAILABILITY = "不都合日入力"  # 旧形式。読み取り専用バックアップとして保持する
+SHEET_UNAVAILABILITY_V2 = "不都合日入力_v2"  # 新形式。1行=1メンバー×1ヶ月
+SHEET_UNAVAILABILITY_HISTORY = "不都合日入力_history"  # 保存成功時のみappend-only
 SHEET_ASSIGNMENTS = "assignments"
 SHEET_ACTUAL_ASSIGNMENTS = "actual_assignments"
 SHEET_APP_STATE = "app_state"
@@ -60,7 +64,15 @@ MEMBERS_HEADER = [
     "absence_start",
     "absence_end",
 ]
+# 旧形式(読み取り専用)のヘッダー。書き込みには使わない。
 UNAVAILABILITY_HEADER = ["member_name", "date", "day_unavailable", "night_unavailable"]
+
+# 新形式(v2)のヘッダーとキー列。1行=1メンバー×1ヶ月(day_mapをJSONで保持)。
+UNAVAILABILITY_V2_HEADER = ["member_name", "year_month", "days_json", "updated_at"]
+UNAVAILABILITY_V2_KEY_COLS = ["member_name", "year_month"]
+
+# 履歴シートのヘッダー。保存ボタン押下による保存成功時のみ1行追記する。
+UNAVAILABILITY_HISTORY_HEADER = ["member_name", "year_month", "days_json", "saved_at"]
 
 
 def _write_local_json(path: Path, data) -> None:
@@ -444,9 +456,53 @@ def get_members_as_models() -> List[Member]:
 # 不都合日データ
 # ----------------------------------------------------------------------
 
-def _fetch_remote_unavailability(year: int, month: int) -> Optional[Dict[str, Dict[str, dict]]]:
-    """「不都合日入力」シートから対象年月の行だけを抜き出して組み立てる。
-    シート自体には複数月のデータが混在してよい(dateで判別するため)。"""
+def _month_key_dash(year: int, month: int) -> str:
+    return f"{year:04d}-{month:02d}"
+
+
+def _clean_day_map(day_map: Dict[str, dict]) -> Dict[str, dict]:
+    """STATE_OK相当(day=False, night=False)の日は保存しない形へ正規化する。"""
+    return {
+        day_str: {"day": bool(flags.get("day", False)), "night": bool(flags.get("night", False))}
+        for day_str, flags in day_map.items()
+        if flags.get("day", False) or flags.get("night", False)
+    }
+
+
+# ----------------------------------------------------------------------
+# 読み込み: 新形式(v2) + 旧形式(バックアップ・後方互換)の統合
+# ----------------------------------------------------------------------
+
+def _fetch_v2_month_records(year: int, month: int) -> Optional[Dict[str, Dict[str, dict]]]:
+    """「不都合日入力_v2」シートから対象年月の全メンバー分を読み込む。
+    読み取り専用(このシートを書き換えない)。Sheets未接続・読み込み失敗時はNone。"""
+    if not sheets_backend.is_configured():
+        return None
+    rows = sheets_backend.read_table(SHEET_UNAVAILABILITY_V2)
+    if rows is None:
+        return None
+
+    ym = _month_key_dash(year, month)
+    result: Dict[str, Dict[str, dict]] = {}
+    for r in rows:
+        if str(r.get("year_month", "")) != ym:
+            continue
+        member_name = str(r.get("member_name", "")).strip()
+        if not member_name:
+            continue
+        raw_json = r.get("days_json", "")
+        try:
+            day_map = json.loads(raw_json) if raw_json else {}
+        except (json.JSONDecodeError, TypeError):
+            day_map = {}
+        result[member_name] = _clean_day_map(day_map)
+    return result
+
+
+def _fetch_legacy_month_records(year: int, month: int) -> Optional[Dict[str, Dict[str, dict]]]:
+    """旧形式「不都合日入力」シート(1日1行)から対象年月の行を読み込む。
+    読み取り専用(このシートには二度と書き込まない)。
+    v2にまだ記録の無いメンバーのための後方互換フォールバック用。"""
     if not sheets_backend.is_configured():
         return None
     rows = sheets_backend.read_table(SHEET_UNAVAILABILITY)
@@ -469,34 +525,25 @@ def _fetch_remote_unavailability(year: int, month: int) -> Optional[Dict[str, Di
     return result
 
 
-def _push_unavailability_to_sheets(year: int, month: int, data: Dict[str, Dict[str, dict]]) -> None:
-    """対象年月の行だけを入れ替える(他の月・他メンバーの行はそのまま残す)。"""
-    if not sheets_backend.is_configured():
-        return
-    existing = sheets_backend.read_table(SHEET_UNAVAILABILITY)
-    if existing is None:
-        existing = []
-    prefix = f"{year:04d}-{month:02d}-"
-    kept = [r for r in existing if not str(r.get("date", "")).startswith(prefix)]
-    new_rows = [
-        {
-            "member_name": member_name,
-            "date": day_str,
-            "day_unavailable": int(bool(flags.get("day", False))),
-            "night_unavailable": int(bool(flags.get("night", False))),
-        }
-        for member_name, days in data.items()
-        for day_str, flags in days.items()
-    ]
-    sheets_backend.write_table(SHEET_UNAVAILABILITY, UNAVAILABILITY_HEADER, kept + new_rows)
-
-
 def load_unavailability_raw(year: int, month: int) -> Dict[str, Dict[str, dict]]:
-    remote = _fetch_remote_unavailability(year, month)
-    if remote is not None:
-        _write_local_json(_unavailability_path(year, month), remote)
-        return remote
+    """対象年月の全メンバー分の不都合日を読み込む(読み取り専用)。
 
+    v2シートとレガシーシートを統合するが、統合はメンバー単位で行う
+    (同一メンバーの新旧データを日付レベルで混ぜない)。あるメンバーが
+    v2に記録を持っていれば、そのメンバーについては常にv2の内容のみを
+    採用する(=v2の新しいデータがレガシーの古いデータで上書きされたり、
+    逆にレガシーの古いデータがv2より優先されたりすることはない)。
+    v2に記録の無いメンバーだけ、レガシーシートの内容で補完する。
+    """
+    v2 = _fetch_v2_month_records(year, month)
+    if v2 is not None:
+        legacy = _fetch_legacy_month_records(year, month) or {}
+        merged: Dict[str, Dict[str, dict]] = dict(legacy)
+        merged.update(v2)  # メンバー単位でv2が常に優先(新しい保存方式が正)
+        _write_local_json(_unavailability_path(year, month), merged)
+        return merged
+
+    # Sheets未接続、または読み込み失敗時はローカルキャッシュにフォールバック
     path = _unavailability_path(year, month)
     if not path.exists():
         return {}
@@ -504,18 +551,113 @@ def load_unavailability_raw(year: int, month: int) -> Dict[str, Dict[str, dict]]
         return json.load(f)
 
 
-def save_unavailability_raw(year: int, month: int, data: Dict[str, Dict[str, dict]]) -> None:
-    _write_local_json(_unavailability_path(year, month), data)
-    _push_unavailability_to_sheets(year, month, data)
+def get_local_unavailability(year: int, month: int) -> Dict[str, Dict[str, dict]]:
+    """ローカルJSONキャッシュのみを読む(Sheetsへはアクセスしない)。
+    管理者による「ローカルの内容を一括でSheetsへ反映する」用途向け。"""
+    return _read_local_json(_unavailability_path(year, month), {})
 
 
-def get_member_day_state(year: int, month: int, member_name: str, day_str: str) -> str:
-    data = load_unavailability_raw(year, month)
-    member_data = data.get(member_name, {})
-    entry = member_data.get(day_str)
-    if not entry:
+# ----------------------------------------------------------------------
+# 保存: member × year_month を単位とした安全な保存(v2)
+# ----------------------------------------------------------------------
+
+def _save_member_month_to_sheets(year: int, month: int, member_name: str, day_map: Dict[str, dict]) -> bool:
+    """1名・1ヶ月分をv2シートへ安全にupsertする。ws.clear()は使わない。
+    他メンバー・他月の行には一切触れない。"""
+    if not sheets_backend.is_configured():
+        return False
+    from datetime import datetime as _dt
+
+    ym = _month_key_dash(year, month)
+    row = {
+        "member_name": member_name,
+        "year_month": ym,
+        "days_json": json.dumps(day_map, ensure_ascii=False),
+        "updated_at": _dt.now().isoformat(),
+    }
+    return sheets_backend.upsert_keyed_row(
+        SHEET_UNAVAILABILITY_V2,
+        UNAVAILABILITY_V2_HEADER,
+        UNAVAILABILITY_V2_KEY_COLS,
+        {"member_name": member_name, "year_month": ym},
+        row,
+    )
+
+
+def _append_unavailability_history(year: int, month: int, member_name: str, day_map: Dict[str, dict]) -> None:
+    """保存成功時のみ呼ばれる。append-onlyで履歴を1行追加する(失敗は無視)。"""
+    if not sheets_backend.is_configured():
+        return
+    from datetime import datetime as _dt
+
+    row = {
+        "member_name": member_name,
+        "year_month": _month_key_dash(year, month),
+        "days_json": json.dumps(day_map, ensure_ascii=False),
+        "saved_at": _dt.now().isoformat(),
+    }
+    sheets_backend.append_row_safe(SHEET_UNAVAILABILITY_HISTORY, UNAVAILABILITY_HISTORY_HEADER, row)
+
+
+def save_member_unavailability(
+    year: int, month: int, member_name: str, day_map: Dict[str, dict]
+) -> Tuple[bool, str]:
+    """member_name 1名・1ヶ月分の不都合日を保存する唯一の入口。
+
+    - ローカルJSONキャッシュ(その月の全メンバー分)を更新する(他メンバー分は保持)
+    - Google Sheetsが設定されていれば「不都合日入力_v2」へ対象行だけを
+      安全にupsertする(ws.clear()は一切使わない。他メンバー・他月の行は
+      絶対に変更しない)
+    - Sheetsへの保存に成功した場合のみ、履歴シートへ1行追記する
+    - タップ操作からは呼ばない(呼び出しは「保存」ボタン押下時のみ)
+
+    仕様(同一member×year_monthを複数セッションが同時編集した場合):
+    内部でsheets_backend.upsert_keyed_row()を使うため、
+    同一メンバー・同一年月を2つのブラウザセッション(同じ医師の複数タブ、
+    または管理者操作とメンバー操作が重なった場合など)がほぼ同時に保存
+    すると last-write-wins になる。すなわち、後からGoogle Sheetsへの
+    書き込みが完了した方の内容がそのまま残り、2つの入力内容がマージ
+    されることはない。異なるメンバー・異なる年月同士の保存は、
+    タイミングに関わらず互いに影響しない(対象行が異なるため)。
+    詳細は sheets_backend.upsert_keyed_row() のdocstringを参照。
+
+    戻り値: (成功したか, 表示用メッセージ)
+    """
+    cleaned = _clean_day_map(day_map)
+
+    try:
+        local_data = get_local_unavailability(year, month)
+        if cleaned:
+            local_data[member_name] = cleaned
+        else:
+            local_data.pop(member_name, None)
+        _write_local_json(_unavailability_path(year, month), local_data)
+    except Exception as e:  # noqa: BLE001
+        return False, f"ローカル保存に失敗しました: {e}"
+
+    touch_last_updated(year, month, member_name)
+
+    if not sheets_backend.is_configured():
+        return True, "保存しました(ローカル)。"
+
+    ok = _save_member_month_to_sheets(year, month, member_name, cleaned)
+    if ok:
+        _append_unavailability_history(year, month, member_name, cleaned)
+        set_member_sheets_sync(year, month, member_name, kind="saved")
+        return True, "保存しました(Googleスプレッドシートにも反映済みです)。"
+
+    return False, "Googleスプレッドシートへの反映に失敗しました。画面上の入力内容は保持されています。しばらくしてから再度保存してください。"
+
+
+# ----------------------------------------------------------------------
+# タップ操作用の純粋関数(Sheets/ローカルには一切アクセスしない)
+# ----------------------------------------------------------------------
+
+def state_from_flags(flags: Optional[dict]) -> str:
+    """{"day": bool, "night": bool} から状態文字列を求める(副作用なし)。"""
+    if not flags:
         return STATE_OK
-    d, n = entry.get("day", False), entry.get("night", False)
+    d, n = bool(flags.get("day", False)), bool(flags.get("night", False))
     if d and n:
         return STATE_FULL_OFF
     if d:
@@ -525,26 +667,188 @@ def get_member_day_state(year: int, month: int, member_name: str, day_str: str) 
     return STATE_OK
 
 
+def next_cycle_state(state: str) -> str:
+    """状態を次の状態に進める(副作用なし)。"""
+    return STATE_ORDER[(STATE_ORDER.index(state) + 1) % len(STATE_ORDER)]
+
+
+def flags_from_state(state: str) -> Optional[dict]:
+    """状態文字列から {"day": bool, "night": bool} を求める。
+    STATE_OKの場合はNone(=保存しない)を返す(副作用なし)。"""
+    if state == STATE_OK:
+        return None
+    return {
+        "day": state in (STATE_DAY_OFF, STATE_FULL_OFF),
+        "night": state in (STATE_NIGHT_OFF, STATE_FULL_OFF),
+    }
+
+
+# ----------------------------------------------------------------------
+# 後方互換API(1日単位の即時保存)。テスト・スクリプト等から使う場合のみ。
+# タップ操作の経路としては使わない(保存はセッション状態に留め、保存ボタン
+# 押下時にsave_member_unavailability()を1回だけ呼ぶ)。
+# 内部的にはsave_member_unavailability()(=v2への安全なupsert)を経由する
+# ため、ここを呼んでもシート全体のclearは発生しない。
+# ----------------------------------------------------------------------
+
+def get_member_day_state(year: int, month: int, member_name: str, day_str: str) -> str:
+    data = load_unavailability_raw(year, month)
+    return state_from_flags(data.get(member_name, {}).get(day_str))
+
+
 def set_member_day_state(year: int, month: int, member_name: str, day_str: str, state: str) -> None:
     data = load_unavailability_raw(year, month)
-    member_data = data.setdefault(member_name, {})
-    if state == STATE_OK:
+    member_data = dict(data.get(member_name, {}))
+    flags = flags_from_state(state)
+    if flags is None:
         member_data.pop(day_str, None)
     else:
-        member_data[day_str] = {
-            "day": state in (STATE_DAY_OFF, STATE_FULL_OFF),
-            "night": state in (STATE_NIGHT_OFF, STATE_FULL_OFF),
-        }
-    save_unavailability_raw(year, month, data)
-    touch_last_updated(year, month, member_name)
+        member_data[day_str] = flags
+    save_member_unavailability(year, month, member_name, member_data)
 
 
 def cycle_member_day_state(year: int, month: int, member_name: str, day_str: str) -> str:
     """状態を次の状態に巡回させ、保存後の新しい状態を返す"""
     current = get_member_day_state(year, month, member_name, day_str)
-    next_state = STATE_ORDER[(STATE_ORDER.index(current) + 1) % len(STATE_ORDER)]
-    set_member_day_state(year, month, member_name, day_str, next_state)
-    return next_state
+    nxt = next_cycle_state(current)
+    set_member_day_state(year, month, member_name, day_str, nxt)
+    return nxt
+
+
+# ----------------------------------------------------------------------
+# 旧形式 → v2 への移行(手動実行のみ。自動実行はしない)
+# ----------------------------------------------------------------------
+
+def _build_legacy_month_groups() -> Dict[Tuple[str, str], Dict[str, dict]]:
+    """旧シート「不都合日入力」全体を読み込み、(member_name, year_month) ごとに
+    day_mapへグルーピングする。読み取り専用(旧シートは一切変更しない)。"""
+    rows = sheets_backend.read_table(SHEET_UNAVAILABILITY)
+    if rows is None:
+        return {}
+    groups: Dict[Tuple[str, str], Dict[str, dict]] = {}
+    for r in rows:
+        date_str = str(r.get("date", "")).strip()
+        if len(date_str) < 7:
+            continue
+        ym = date_str[:7]
+        member_name = str(r.get("member_name", "")).strip()
+        if not member_name:
+            continue
+        d = str(r.get("day_unavailable", "")).strip().lower() in ("1", "true")
+        n = str(r.get("night_unavailable", "")).strip().lower() in ("1", "true")
+        if not (d or n):
+            continue
+        groups.setdefault((member_name, ym), {})[date_str] = {"day": d, "night": n}
+    return groups
+
+
+def _read_v2_all_keys_and_data() -> Dict[Tuple[str, str], Dict[str, dict]]:
+    """v2シートの全行を (member_name, year_month) -> day_map の形で読み込む(読み取り専用)。"""
+    rows = sheets_backend.read_table(SHEET_UNAVAILABILITY_V2) or []
+    result: Dict[Tuple[str, str], Dict[str, dict]] = {}
+    for r in rows:
+        key = (str(r.get("member_name", "")), str(r.get("year_month", "")))
+        raw_json = r.get("days_json", "")
+        try:
+            result[key] = json.loads(raw_json) if raw_json else {}
+        except (json.JSONDecodeError, TypeError):
+            result[key] = {}
+    return result
+
+
+def migrate_unavailability_to_v2(skip_existing: bool = True) -> dict:
+    """
+    旧シート「不都合日入力」(1日1行)の全データを (member_name, year_month)
+    ごとにグルーピングし、v2シート「不都合日入力_v2」へ安全にupsertする。
+
+    - 対象行の更新・追記にのみ ws.clear() を使わない upsert_keyed_row() を使う
+      (シート全体のclearは一切発生しない)
+    - skip_existing=True(既定)の場合、v2に既に存在する
+      (member_name, year_month) の組は上書きしない。これにより、
+      メンバーが移行後に保存した新しいデータが、移行処理の再実行によって
+      古いレガシーデータで上書きされることはない
+    - 旧シートは一切変更しない(バックアップとしてそのまま残る)
+    - 何度実行しても結果は同じになる(冪等)
+
+    戻り値: {"total": 対象組数, "migrated": 新規作成数, "skipped": 既存のためスキップした数,
+             "failed": 失敗数, "errors": [失敗したキーのリスト]}
+    """
+    empty_result = {"total": 0, "migrated": 0, "skipped": 0, "failed": 0, "errors": []}
+    if not sheets_backend.is_configured():
+        return dict(empty_result, errors=["Googleスプレッドシート連携が設定されていません。"])
+
+    groups = _build_legacy_month_groups()
+    existing_keys = set(_read_v2_all_keys_and_data().keys()) if skip_existing else set()
+
+    result = dict(empty_result)
+    result["total"] = len(groups)
+    from datetime import datetime as _dt
+
+    for (member_name, ym), day_map in sorted(groups.items()):
+        if skip_existing and (member_name, ym) in existing_keys:
+            result["skipped"] += 1
+            continue
+        row = {
+            "member_name": member_name,
+            "year_month": ym,
+            "days_json": json.dumps(day_map, ensure_ascii=False),
+            "updated_at": _dt.now().isoformat(),
+        }
+        ok = sheets_backend.upsert_keyed_row(
+            SHEET_UNAVAILABILITY_V2,
+            UNAVAILABILITY_V2_HEADER,
+            UNAVAILABILITY_V2_KEY_COLS,
+            {"member_name": member_name, "year_month": ym},
+            row,
+        )
+        if ok:
+            result["migrated"] += 1
+        else:
+            result["failed"] += 1
+            result["errors"].append(f"{member_name} / {ym}")
+    return result
+
+
+def verify_unavailability_migration() -> dict:
+    """
+    旧シートとv2シートの内容を (member_name, year_month) ごとに比較検証する
+    (読み取り専用。どちらのシートも一切変更しない)。
+
+    戻り値: {
+        "total_legacy_keys": 旧シート側に存在する組の数,
+        "matched": 一致した組の数,
+        "mismatched": [(member_name, year_month), ...],  # 内容が一致しない組
+        "missing_in_v2": [(member_name, year_month), ...],  # v2にまだ存在しない組
+    }
+    """
+    empty_result = {"total_legacy_keys": 0, "matched": 0, "mismatched": [], "missing_in_v2": []}
+    if not sheets_backend.is_configured():
+        return empty_result
+
+    legacy_groups = _build_legacy_month_groups()
+    v2_data = _read_v2_all_keys_and_data()
+
+    matched = 0
+    mismatched: List[Tuple[str, str]] = []
+    missing: List[Tuple[str, str]] = []
+
+    for key, legacy_map in sorted(legacy_groups.items()):
+        if key not in v2_data:
+            missing.append(key)
+            continue
+        norm_legacy = _clean_day_map(legacy_map)
+        norm_v2 = _clean_day_map(v2_data[key])
+        if norm_legacy == norm_v2:
+            matched += 1
+        else:
+            mismatched.append(key)
+
+    return {
+        "total_legacy_keys": len(legacy_groups),
+        "matched": matched,
+        "mismatched": mismatched,
+        "missing_in_v2": missing,
+    }
 
 
 def get_unavailability_objects(year: int, month: int) -> List[Unavailability]:
@@ -583,35 +887,35 @@ def get_submission_stats(year: int, month: int) -> Dict[str, int]:
 
 def replace_member_unavailability(year: int, month: int, member_name: str, day_map: Dict[str, dict]) -> None:
     """
-    member_name 1名分の不都合日データを day_map で完全に置き換える。
+    member_name 1名分の不都合日データで「ローカルキャッシュ」だけを置き換える。
     day_map は {"YYYY-MM-DD": {"day": bool, "night": bool}, ...} の形式。
-    他メンバーのデータは変更しない(Googleスプレッドシートからの
-    1人分読み込みなど、複数人が同時に入力する運用向け)。
+    他メンバーのローカルデータは変更しない。
+
+    注意: この関数はSheetsへは一切書き込まない(読み込んだ内容をローカルに
+    反映するだけの用途)。Sheetsへ保存したい場合は save_member_unavailability()
+    を使うこと。
     """
-    data = load_unavailability_raw(year, month)
-    # STATE_OK相当(day=False, night=False)の日はローカル側の表現に合わせて保存しない
-    data[member_name] = {
-        day_str: {"day": bool(flags.get("day", False)), "night": bool(flags.get("night", False))}
-        for day_str, flags in day_map.items()
-        if flags.get("day", False) or flags.get("night", False)
-    }
-    save_unavailability_raw(year, month, data)
+    data = get_local_unavailability(year, month)
+    cleaned = _clean_day_map(day_map)
+    if cleaned:
+        data[member_name] = cleaned
+    else:
+        data.pop(member_name, None)
+    _write_local_json(_unavailability_path(year, month), data)
 
 
 def replace_all_unavailability(year: int, month: int, by_member: Dict[str, Dict[str, dict]]) -> None:
     """
-    全メンバー分の不都合日データを by_member で完全に置き換える
-    (管理者による「Google Sheetsから一括読み込み」用)。
+    全メンバー分の不都合日データで「ローカルキャッシュ」だけを置き換える
+    (Sheetsの最新内容をローカルへ反映する用途)。
     by_member は {"名前": {"YYYY-MM-DD": {"day": bool, "night": bool}, ...}, ...} の形式。
+
+    注意: この関数はSheetsへは一切書き込まない。
     """
-    cleaned: Dict[str, Dict[str, dict]] = {}
-    for member_name, day_map in by_member.items():
-        cleaned[member_name] = {
-            day_str: {"day": bool(flags.get("day", False)), "night": bool(flags.get("night", False))}
-            for day_str, flags in day_map.items()
-            if flags.get("day", False) or flags.get("night", False)
-        }
-    save_unavailability_raw(year, month, cleaned)
+    cleaned: Dict[str, Dict[str, dict]] = {
+        member_name: _clean_day_map(day_map) for member_name, day_map in by_member.items()
+    }
+    _write_local_json(_unavailability_path(year, month), cleaned)
 
 
 # ----------------------------------------------------------------------
