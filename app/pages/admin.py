@@ -492,28 +492,35 @@ else:
         st.rerun()
 
     if sync_settings["spreadsheet_key"]:
-        st.markdown("**入力データ(不都合日)の一括保存・読み込み**")
-        manual_col1, manual_col2 = st.columns(2)
-        with manual_col1:
-            if st.button("📤 全員分をスプレッドシートに保存", use_container_width=True):
-                ok, message = ssync.save_all(config["year"], config["month"])
-                (st.success if ok else st.error)(message)
-        with manual_col2:
-            confirm_load = st.checkbox(
-                "Google Sheetsの内容でローカルデータを更新します。よろしいですか?",
-                key="confirm_load_all_unavailability",
-            )
-            if st.button(
-                "📥 全員分をスプレッドシートから読み込む",
-                use_container_width=True,
-                disabled=not confirm_load,
-            ):
-                ok, message = ssync.load_all(config["year"], config["month"])
-                if ok:
-                    st.success(message)
-                    st.rerun()
-                else:
-                    st.error(message)
+        st.markdown("**入力データ(不都合日)の読み込み**")
+        st.caption(
+            "Googleスプレッドシート(不都合日入力_v2。無い場合は旧シート)を"
+            "常に正データ(source of truth)として扱う。この「読み込む」は"
+            "その最新内容でローカルの表示用キャッシュを更新するだけで、"
+            "Sheets側へは一切書き込まない。"
+        )
+        st.caption(
+            "⚠️ 以前あった「ローカルの全員分をスプレッドシートへ一括保存」機能は"
+            "廃止した。ローカルのキャッシュはメンバーがv2へ直接保存した最新の"
+            "内容より古い場合があり、それをそのままSheetsへ書き戻すと"
+            "最新データを古い内容で上書きしてしまう恐れがあるため。"
+            "各メンバーの保存は、そのメンバー自身が入力画面の「保存する」"
+            "ボタンで行う(対象1名・1ヶ月分だけの安全な保存)。"
+        )
+        confirm_load = st.checkbox(
+            "Google Sheetsの内容でローカルデータを更新します。よろしいですか?",
+            key="confirm_load_all_unavailability",
+        )
+        if st.button(
+            "📥 全員分をスプレッドシートから読み込む",
+            disabled=not confirm_load,
+        ):
+            ok, message = ssync.load_all(config["year"], config["month"])
+            if ok:
+                st.success(message)
+                st.rerun()
+            else:
+                st.error(message)
 
         admin_sync_times = ds.get_admin_sheets_sync(config["year"], config["month"])
         if admin_sync_times.get("saved") or admin_sync_times.get("loaded"):
@@ -523,6 +530,67 @@ else:
             if admin_sync_times.get("loaded"):
                 parts.append(f"読み込み: {_format_sync_time(admin_sync_times['loaded'])}")
             st.caption("最終同期時刻 - " + " / ".join(parts))
+
+        st.markdown("---")
+        st.markdown("**旧形式データの移行(不都合日入力 → 不都合日入力_v2)**")
+        st.caption(
+            "以前の保存方式(1日1行、シート全体を書き戻す方式)で「不都合日入力」"
+            "シートに残っているデータを、新しい安全な保存方式のシート"
+            "「不都合日入力_v2」(1行=1メンバー×1ヶ月)へコピーします。"
+            "旧シートは削除・変更されず、そのままバックアップとして残ります。"
+            "既にv2に存在するメンバー×年月のデータは上書きしません"
+            "(移行後にメンバーが保存した新しいデータを、移行の再実行で"
+            "古いデータに戻してしまうことがないようにするためです)。"
+            "そのため、複数回実行しても結果は変わりません。"
+        )
+        migrate_col1, migrate_col2 = st.columns(2)
+        with migrate_col1:
+            if st.button("🔍 移行前チェック(検証のみ・書き込みなし)", use_container_width=True):
+                verify_result = ds.verify_unavailability_migration()
+                st.write(
+                    f"旧シート側の対象(メンバー×年月): {verify_result['total_legacy_keys']}件 / "
+                    f"v2と一致: {verify_result['matched']}件 / "
+                    f"v2にまだ無い: {len(verify_result['missing_in_v2'])}件 / "
+                    f"内容が異なる: {len(verify_result['mismatched'])}件"
+                )
+                if verify_result["mismatched"]:
+                    st.warning(
+                        "内容が異なる組み合わせ(v2側の新しいデータが優先されます): "
+                        + ", ".join(f"{n}/{ym}" for n, ym in verify_result["mismatched"])
+                    )
+        with migrate_col2:
+            confirm_migrate = st.checkbox(
+                "旧シートのうち、v2にまだ無いメンバー×年月だけをv2へコピーします。よろしいですか?",
+                key="confirm_migrate_unavailability_v2",
+            )
+            if st.button(
+                "🚚 移行を実行(v2に無い分のみ追加)",
+                use_container_width=True,
+                disabled=not confirm_migrate,
+            ):
+                migrate_result = ds.migrate_unavailability_to_v2(skip_existing=True)
+                st.success(
+                    f"移行完了: 対象{migrate_result['total']}件 / "
+                    f"新規反映{migrate_result['migrated']}件 / "
+                    f"既存のためスキップ{migrate_result['skipped']}件 / "
+                    f"失敗{migrate_result['failed']}件"
+                )
+                if migrate_result["errors"]:
+                    st.error("失敗した組み合わせ: " + ", ".join(migrate_result["errors"]))
+
+        if st.button("✅ 移行後チェック(旧シートとv2が一致しているか再確認)"):
+            verify_result = ds.verify_unavailability_migration()
+            if not verify_result["mismatched"] and not verify_result["missing_in_v2"]:
+                st.success(
+                    f"旧シートの全{verify_result['total_legacy_keys']}件がv2と一致しています。"
+                )
+            else:
+                st.warning(
+                    f"v2にまだ無い: {len(verify_result['missing_in_v2'])}件 / "
+                    f"内容が異なる: {len(verify_result['mismatched'])}件 "
+                    "(内容が異なる場合はv2側の新しいデータが優先されるため、"
+                    "アプリの動作としては問題ありません)"
+                )
 
 st.divider()
 

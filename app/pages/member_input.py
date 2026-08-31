@@ -11,10 +11,12 @@
   どの月を見ているか」という表示上の状態(ブラウザのセッション内でのみ保持)
 - カレンダーが表示される
 - 各日をタップすると 「○(終日OK)→×(終日不可)→▲昼(日中不可)→▲夜(夜間不可)→○...」
-  の順に状態が切り替わる(タップごとに自動保存)
+  の順に状態が切り替わる。タップ中の変更は st.session_state (ブラウザの
+  セッション内)だけに保持され、Google Sheetsへは一切アクセスしない。
 - 入力締切が設定されていれば、締切までの残り日数を表示する
-- 「入力内容を確定する」を押すと、(自動同期が有効な場合)
-  Googleスプレッドシートへも同期される
+- 「💾 保存する」を押した時点で初めて、その人・その月分のデータだけを
+  Googleスプレッドシート(不都合日入力_v2)へ安全に保存する
+  (member×year_month単位のupsertで、他メンバー・他月のデータには触れない)
 - 毎月同じURLを使い続けられる(年月はアプリ全体の設定なので、
   月が変わってもURLを再取得する必要はない)
 """
@@ -32,7 +34,6 @@ if str(_APP_DIR) not in sys.path:
 
 import auth  # noqa: E402
 import data_store as ds  # noqa: E402
-import sheets_sync as ssync  # noqa: E402
 import ui_common as uc  # noqa: E402
 
 
@@ -134,8 +135,18 @@ if ds.is_finalized(year, month):
 st.markdown(
     "各日をタップすると状態が切り替わります: "
     "**○(終日OK) → ×(終日不可) → ▲昼(日中不可) → ▲夜(夜間不可) → ○...** "
-    "タップした瞬間に自動保存されます。"
+    "タップ中の変更はこの画面上だけに一時保存され、"
+    "下の「💾 保存する」を押した時点でGoogleスプレッドシートに反映されます。"
 )
+
+# --- タップ中の編集内容はセッション状態(ブラウザのセッション内)だけに保持する。
+#     タップのたびにGoogleスプレッドシートへ読み書きすることはない。
+#     (year, month, selected)の組み合わせごとに独立したキーを持つため、
+#     表示月を切り替えても他の月の未保存編集は保持される。
+pending_key = f"unavail_pending_{selected}_{year}_{month}"
+if pending_key not in st.session_state:
+    st.session_state[pending_key] = dict(ds.load_unavailability_raw(year, month).get(selected, {}))
+pending_map: Dict[str, dict] = st.session_state[pending_key]
 
 legend_items = [
     (ds.STATE_OK, "終日OK"),
@@ -247,7 +258,7 @@ for week in weeks:
         if d is None:
             continue
         day_str = d.isoformat()
-        state = ds.get_member_day_state(year, month, selected, day_str)
+        state = ds.state_from_flags(pending_map.get(day_str))
         cell_key = f"cal_{d.day:02d}_{state}"
         day_keys[day_str] = cell_key
         border_extra = "border-color:#94a3b8 !important;" if uc.is_weekend(d) else ""
@@ -271,7 +282,7 @@ with st.container(key=CAL_CONTAINER_KEY):
                     st.markdown("<div class='cal-empty'></div>", unsafe_allow_html=True)
                     continue
                 day_str = d.isoformat()
-                state = ds.get_member_day_state(year, month, selected, day_str)
+                state = ds.state_from_flags(pending_map.get(day_str))
                 label = f"{d.day}\n{STATE_SHORT_LABEL[state]}"
                 if st.button(
                     label,
@@ -279,32 +290,34 @@ with st.container(key=CAL_CONTAINER_KEY):
                     use_container_width=True,
                     help=f"{d.day}日: {ds.STATE_LABEL[state]}",
                 ):
-                    ds.cycle_member_day_state(year, month, selected, day_str)
+                    # ここではセッション状態(pending_map)だけを書き換える。
+                    # Google Sheets・ローカルファイルへは一切アクセスしない。
+                    nxt = ds.next_cycle_state(state)
+                    flags = ds.flags_from_state(nxt)
+                    if flags is None:
+                        pending_map.pop(day_str, None)
+                    else:
+                        pending_map[day_str] = flags
                     st.rerun()
 
 st.caption("色で状態を判別できます。表示: ○=終日OK、×終=終日不可、▲昼=日中不可、▲夜=夜間不可")
 
 st.divider()
 
-if st.button("✅ 入力内容を確定する", type="primary"):
-    st.success(f"{selected}さんの{year}年{month}月分の入力内容を確認しました。タップした内容は自動保存済みです。")
+if st.button("💾 保存する", type="primary"):
+    ok, message = ds.save_member_unavailability(year, month, selected, dict(pending_map))
+    if ok:
+        st.success(f"{selected}さんの{year}年{month}月分を保存しました。{message}")
+    else:
+        st.error(f"保存に失敗しました。入力内容はこの画面に残っています。再度お試しください: {message}")
 
-    sync_settings = ds.get_auto_sync_settings()
-    if sync_settings["enabled"] and sync_settings["spreadsheet_key"]:
-        ok, message = ssync.save_member(year, month, selected)
-        if ok:
-            st.success(message)
-        else:
-            st.warning(f"スプレッドシートへの同期に失敗しました(入力内容自体は保存済みです): {message}")
-
-st.caption("入力後、内容の変更が必要な場合は再度タップして状態を切り替えてください。このURLは毎月そのまま使えます。")
+st.caption("入力後、内容の変更が必要な場合は再度タップして状態を切り替え、「保存する」を押してください。このURLは毎月そのまま使えます。")
 
 # ------------------------------------------------------------------
 # 「Googleスプレッドシートと同期」の手動ボタンはメンバー側には表示しない。
-# 「入力内容を確定する」を押した時点で(自動同期が有効な場合)既に
-# Googleスプレッドシートへ同期済みのため、メンバーが手動同期を意識する
-# 必要はない。最新状態が必要な場合は通常のページ再読み込みで対応する。
-# 手動同期ボタンは管理者画面(admin.py)のみに残している。
+# 上の「💾 保存する」を押した時点で既にGoogleスプレッドシート(v2)へ
+# 保存済みのため、メンバーが別途同期を意識する必要はない。
+# 管理者向けの一括保存・読み込みボタンは管理者画面(admin.py)のみに残している。
 # ------------------------------------------------------------------
 
 st.divider()
