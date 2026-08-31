@@ -7,14 +7,8 @@ Streamlit Community Cloud上では st.secrets["gcp_service_account"] を使っ�
 認証する。どちらも無い場合は「未設定」として扱い、例外を投げずに
 Falseや案内メッセージを返す(呼び出し側でアプリが落ちないようにするため)。
 
-この層は admin.py / member_input.py から使う想定。
-
-不都合日の保存・読み込みについては、シート全体を ws.clear() して書き戻す
-旧方式(src/sheets_io.py の SheetsClient.write_unavailability* 系)による
-データ消失事故が過去に発生したため、現在は data_store.py 側の安全な
-v2保存経路(member×year_month単位のupsert。ws.clear()を一切使わない)に
-統一している。SheetsClient は勤務表・集計表の書き込み(write_schedule等)や
-CLI(src/main.py)での不都合日読み込みには引き続き使われる。
+この層は admin.py / member_input.py から使う想定で、
+実際のGoogle Sheets APIの読み書きは src/sheets_io.py の SheetsClient に委譲する。
 """
 from __future__ import annotations
 
@@ -108,63 +102,98 @@ def get_client(spreadsheet_key: Optional[str] = None):
 
 # ----------------------------------------------------------------------
 # 医師1名分の保存・読み込み(メンバー入力画面用)
-#
-# 不都合日の保存・読み込みは、他ユーザー・他月のデータを壊す事故が
-# 過去に起きたため、シート全体を ws.clear() して書き戻す旧方式
-# (SheetsClient.write_unavailability* 系)はもう使わない。
-# data_store.py 側の安全なv2保存経路(member×year_month単位でのupsert、
-# ws.clear()を一切使わない)に統一する。
 # ----------------------------------------------------------------------
 
-def save_member(year: int, month: int, member_name: str, day_map: Optional[dict] = None) -> Tuple[bool, str]:
-    """member_name 1名・対象年月分の不都合日データを保存する。
-    他メンバー・他月のデータには一切触れない(v2の安全なupsート経路を使用)。
-
-    day_map を渡さない場合は、現在ローカルにキャッシュされている
-    その人のデータをそのまま保存する。
+def save_member(year: int, month: int, member_name: str) -> Tuple[bool, str]:
+    """member_name 1名分の不都合日データをスプレッドシートへ保存する。
+    他メンバーのデータは変更しない。
     """
-    if day_map is None:
-        day_map = ds.get_local_unavailability(year, month).get(member_name, {})
-    return ds.save_member_unavailability(year, month, member_name, day_map)
+    if not is_configured():
+        return False, "Googleスプレッドシート連携が設定されていません。"
+
+    client = get_client()
+    if client is None:
+        return False, "スプレッドシートに接続できませんでした。設定を確認してください。"
+
+    try:
+        all_unavailabilities = ds.get_unavailability_objects(year, month)
+        own = [u for u in all_unavailabilities if u.member_name == member_name]
+        client.write_unavailability_for_member(member_name, own)
+    except Exception as e:  # noqa: BLE001
+        return False, f"保存に失敗しました: {e}"
+
+    ds.set_member_sheets_sync(year, month, member_name, kind="saved")
+    return True, "Googleスプレッドシートに保存しました。"
 
 
 def load_member(year: int, month: int, member_name: str) -> Tuple[bool, str]:
-    """Googleスプレッドシート(v2優先、無ければ旧シート)上の member_name
-    1名分のデータを読み直し、ローカルキャッシュへ反映する。
-    他メンバーのローカルデータは変更しない。Sheetsへは書き込まない。
+    """スプレッドシート上の member_name 1名分のデータをローカルに反映する。
+    他メンバーのローカルデータは変更しない。
     """
-    if not is_configured() and not sheets_backend.is_configured():
+    if not is_configured():
         return False, "Googleスプレッドシート連携が設定されていません。"
 
-    remote_all = ds.load_unavailability_raw(year, month)
-    day_map = remote_all.get(member_name, {})
+    client = get_client()
+    if client is None:
+        return False, "スプレッドシートに接続できませんでした。設定を確認してください。"
+
+    try:
+        remote = client.load_unavailability_for_member(member_name)
+    except Exception as e:  # noqa: BLE001
+        return False, f"読み込みに失敗しました: {e}"
+
+    day_map = {
+        u.day.isoformat(): {"day": u.day_unavailable, "night": u.night_unavailable} for u in remote
+    }
     ds.replace_member_unavailability(year, month, member_name, day_map)
     ds.set_member_sheets_sync(year, month, member_name, kind="loaded")
-    return True, "Googleスプレッドシートの内容でローカルデータを更新しました。"
+    return True, "Googleスプレッドシートから読み込みました。"
 
 
 # ----------------------------------------------------------------------
-# 全メンバー一括の読み込み(管理者画面用)
-#
-# 「ローカルの全員分をSheetsへ一括で上書き保存する」機能(旧 save_all())は
-# 意図的に廃止した。ローカルキャッシュは各メンバーの「保存」ボタン操作や
-# 直近の読み込みタイミングに依存するため、既にメンバーがv2へ直接保存した
-# 最新データより古い可能性があり、それをローカルの古い内容で一括上書きすると
-# 最新データを消してしまう危険がある。Google Sheets(v2)を常にsource of
-# truthとし、ローカルはあくまで表示用キャッシュとして扱う方針に統一する。
-# 個別メンバーの保存は member_input.py の「保存する」ボタン
-# (ds.save_member_unavailability、対象1行のみの安全なupsert)のみを使う。
+# 全メンバー一括の保存・読み込み(管理者画面用)
 # ----------------------------------------------------------------------
 
-def load_all(year: int, month: int) -> Tuple[bool, str]:
-    """Googleスプレッドシート(v2優先、無ければ旧シート)の対象年月の内容で
-    ローカルの不都合日データを上書きする。Sheetsへは書き込まない
-    (読み込みのみ)。呼び出し前に呼び出し側で確認ダイアログを出すこと。
-    """
-    if not sheets_backend.is_configured():
+def save_all(year: int, month: int) -> Tuple[bool, str]:
+    """ローカルの全メンバー分の不都合日データでスプレッドシート全体を上書きする。"""
+    if not is_configured():
         return False, "Googleスプレッドシート連携が設定されていません。"
 
-    by_member = ds.load_unavailability_raw(year, month)
+    client = get_client()
+    if client is None:
+        return False, "スプレッドシートに接続できませんでした。設定を確認してください。"
+
+    try:
+        all_unavailabilities = ds.get_unavailability_objects(year, month)
+        client.write_unavailability(all_unavailabilities)
+    except Exception as e:  # noqa: BLE001
+        return False, f"保存に失敗しました: {e}"
+
+    ds.set_admin_sheets_sync(year, month, kind="saved")
+    return True, "全員分のデータをGoogleスプレッドシートに保存しました。"
+
+
+def load_all(year: int, month: int) -> Tuple[bool, str]:
+    """スプレッドシート全体の内容でローカルの不都合日データを上書きする
+    (Google Sheets優先)。呼び出し前に呼び出し側で確認ダイアログを出すこと。
+    """
+    if not is_configured():
+        return False, "Googleスプレッドシート連携が設定されていません。"
+
+    client = get_client()
+    if client is None:
+        return False, "スプレッドシートに接続できませんでした。設定を確認してください。"
+
+    try:
+        remote = client.load_unavailability()
+    except Exception as e:  # noqa: BLE001
+        return False, f"読み込みに失敗しました: {e}"
+
+    by_member: dict = {}
+    for u in remote:
+        member_map = by_member.setdefault(u.member_name, {})
+        member_map[u.day.isoformat()] = {"day": u.day_unavailable, "night": u.night_unavailable}
+
     ds.replace_all_unavailability(year, month, by_member)
     ds.set_admin_sheets_sync(year, month, kind="loaded")
     return True, "Googleスプレッドシートの内容でローカルデータを更新しました。"
