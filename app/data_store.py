@@ -17,7 +17,7 @@ SQLite等に置き換えれば、UI側(pages/)のコードは変更不要にな�
 from __future__ import annotations
 
 import json
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -1596,3 +1596,220 @@ def get_annual_actual_own_totals(year: int, upto_month: int = 12) -> Dict[str, i
     (翌月以降の自動割当で参照する年間均等化の入力に使う)。"""
     totals = get_annual_actual_totals(year, upto_month=upto_month)
     return {name: s["total"] for name, s in totals.items()}
+
+
+# ----------------------------------------------------------------------
+# 月次生成フロー(final target / 月別目標 / 既知の長期不在)
+#
+# 以下はすべて app_state シート(_state_load/_state_save)への新規キー
+# 追加のみで実現しており、既存の members / assignments /
+# actual_assignments / 不都合日入力 / 不都合日入力_v2 の形式・内容には
+# 一切触れない。get_members_as_models() / compute_auto_targets() も
+# 変更しておらず、他の既存機能からの呼び出しには影響しない。
+#
+# 対象期間(final target の集計対象月)は、現時点では
+# 2026年10月〜2027年3月に固定している(今後複数サイクル運用する場合は
+# ここを設定可能にする拡張の余地がある)。
+# ----------------------------------------------------------------------
+
+FINAL_TARGET_HORIZON_START = (2026, 10)
+FINAL_TARGET_HORIZON_END = (2027, 3)
+
+_KEY_FINAL_TARGET = "final_target"
+_KEY_KNOWN_LONG_TERM_ABSENCE = "known_long_term_absence"
+
+
+def _final_target_path() -> Path:
+    return DATA_DIR / "final_target.json"
+
+
+def get_final_target() -> Dict[str, int]:
+    """3月末までのfinal target(メンバー名 -> 回数)。未設定なら空dict。"""
+    data = _state_load(_KEY_FINAL_TARGET, _final_target_path(), {})
+    return {str(k): int(v) for k, v in (data or {}).items()}
+
+
+def set_final_target(targets: Dict[str, int]) -> None:
+    """final targetを丸ごと置き換える(app_stateの他キーには影響しない)。"""
+    _state_save(_KEY_FINAL_TARGET, _final_target_path(), {str(k): int(v) for k, v in targets.items()})
+
+
+def _month_target_key(year: int, month: int) -> str:
+    return f"month_target_{year:04d}_{month:02d}"
+
+
+def _month_target_path(year: int, month: int) -> Path:
+    return DATA_DIR / f"{_month_target_key(year, month)}.json"
+
+
+def get_month_target(year: int, month: int) -> Dict[str, int]:
+    """指定月の月別目標(メンバー名 -> 回数)。未設定なら空dict。"""
+    key = _month_target_key(year, month)
+    data = _state_load(key, _month_target_path(year, month), {})
+    return {str(k): int(v) for k, v in (data or {}).items()}
+
+
+def set_month_target(year: int, month: int, targets: Dict[str, int]) -> None:
+    """指定月の月別目標を置き換える(他の月・他キーには影響しない)。"""
+    key = _month_target_key(year, month)
+    _state_save(key, _month_target_path(year, month), {str(k): int(v) for k, v in targets.items()})
+
+
+def get_known_long_term_absence() -> Dict[str, List[Dict[str, str]]]:
+    """既知の長期不在期間。{メンバー名: [{"start": "YYYY-MM-DD", "end": "YYYY-MM-DD"}, ...]}。
+    未設定なら空dict。通常の不都合日入力(不都合日入力_v2)とは完全に別の
+    データであり、メンバー入力フローには一切影響しない。"""
+    data = _state_load(_KEY_KNOWN_LONG_TERM_ABSENCE, DATA_DIR / "known_long_term_absence.json", {})
+    return data or {}
+
+
+def set_known_long_term_absence(absences: Dict[str, List[Dict[str, str]]]) -> None:
+    """既知の長期不在期間を丸ごと置き換える(app_stateの他キーには影響しない)。"""
+    _state_save(_KEY_KNOWN_LONG_TERM_ABSENCE, DATA_DIR / "known_long_term_absence.json", absences)
+
+
+def _is_known_absent(name: str, d: date, known_absence: Dict[str, List[Dict[str, str]]]) -> bool:
+    for rng in known_absence.get(name, []):
+        try:
+            start = date.fromisoformat(rng["start"])
+            end = date.fromisoformat(rng["end"])
+        except (KeyError, ValueError):
+            continue
+        if start <= d <= end:
+            return True
+    return False
+
+
+def get_unavailability_objects_with_known_absence(year: int, month: int) -> List[Unavailability]:
+    """get_unavailability_objects()(通常のメンバー入力による不都合日)に、
+    既知の長期不在期間(known_long_term_absence)のうち当月に該当する日を
+    終日不可として追加したリストを返す(hard constraint)。
+
+    通常のメンバー入力フロー・保存形式には一切触れない読み取り専用の
+    合成結果であり、不都合日入力_v2への書き込みは行わない。
+    既にメンバーが同じ日を通常の不都合日として入力済みの場合は重複するが、
+    Unavailabilityはoptimizer側で「不可」の有無だけを見るため、重複があっても
+    挙動には影響しない。
+    """
+    base = get_unavailability_objects(year, month)
+    covered = {(u.member_name, u.day) for u in base}
+
+    known_absence = get_known_long_term_absence()
+    n_days = _days_in_month(year, month)
+    extra: List[Unavailability] = []
+    for member_name, ranges in known_absence.items():
+        for rng in ranges:
+            try:
+                start = date.fromisoformat(rng["start"])
+                end = date.fromisoformat(rng["end"])
+            except (KeyError, ValueError):
+                continue
+            for day_num in range(1, n_days + 1):
+                d = date(year, month, day_num)
+                if start <= d <= end and (member_name, d) not in covered:
+                    extra.append(
+                        Unavailability(member_name=member_name, day=d, day_unavailable=True, night_unavailable=True)
+                    )
+                    covered.add((member_name, d))
+
+    return base + extra
+
+
+def _months_in_range(start_year: int, start_month: int, end_year: int, end_month: int):
+    """(year, month) を start から end まで(両端含む)、年をまたいで順に返す。"""
+    y, m = start_year, start_month
+    while (y, m) <= (end_year, end_month):
+        yield (y, m)
+        m += 1
+        if m > 12:
+            m = 1
+            y += 1
+
+
+def get_confirmed_actual_totals(
+    member_names: List[str],
+    up_to_year: int,
+    up_to_month: int,
+    horizon_start: Tuple[int, int] = FINAL_TARGET_HORIZON_START,
+) -> Dict[str, int]:
+    """horizon_start から (up_to_year, up_to_month) の"前月"まで(年をまたいで
+    よい)を対象に、実績確定済み(is_actual_finalized)の月だけを合算した
+    自院オンコール実績合計を返す({名前: 回数})。
+
+    既存の get_annual_actual_totals() は同一年内(1月〜upto_month)しか
+    集計できないため、10月〜3月のように年をまたぐ運用向けに新設した別関数
+    (既存関数は変更しない)。
+    """
+    totals: Dict[str, int] = {name: 0 for name in member_names}
+    start_y, start_m = horizon_start
+    for (y, m) in _months_in_range(start_y, start_m, up_to_year, up_to_month):
+        if (y, m) >= (up_to_year, up_to_month):
+            break  # up_to月自体は「まだ生成していない今月」として含めない
+        if not is_actual_finalized(y, m):
+            continue
+        snapshot = load_actual_snapshot(y, m)
+        if not snapshot:
+            continue
+        for name, s in snapshot.get("stats", {}).items():
+            if name in totals:
+                totals[name] += int(s.get("total", 0))
+    return totals
+
+
+def get_remaining_target(year: int, month: int) -> Dict[str, int]:
+    """final_target - これまでの確定実績。final_targetが未設定のメンバーは
+    含まれない(=optimizer側でも従来のtarget_countにフォールバックする)。"""
+    final_target = get_final_target()
+    confirmed = get_confirmed_actual_totals(list(final_target.keys()), year, month)
+    return {name: max(0, final_target[name] - confirmed.get(name, 0)) for name in final_target}
+
+
+def get_future_available_slots(
+    year: int,
+    month: int,
+    member_names: List[str],
+    horizon_end: Tuple[int, int] = FINAL_TARGET_HORIZON_END,
+) -> Dict[str, int]:
+    """今月(year, month)の"翌月"から horizon_end まで(年をまたいでよい)の
+    割当可能枠数を、known_long_term_absence を反映して計算する
+    ({名前: 枠数})。通常の不都合日入力(月が近づかないと確定しない分)は
+    対象外とし、既知の長期不在のみを反映する(将来の先読み用)。
+    """
+    known_absence = get_known_long_term_absence()
+    result: Dict[str, int] = {name: 0 for name in member_names}
+
+    # 月を1つ進める(年をまたぐ場合も考慮)
+    ny, nm = year, month + 1
+    if nm > 12:
+        nm = 1
+        ny += 1
+    end_y, end_m = horizon_end
+
+    for (y, m) in _months_in_range(ny, nm, end_y, end_m):
+        n_days = _days_in_month(y, m)
+        for name in member_names:
+            absence_days = sum(
+                1 for day_num in range(1, n_days + 1) if _is_known_absent(name, date(y, m, day_num), known_absence)
+            )
+            result[name] += (n_days - absence_days) * 2
+    return result
+
+
+def get_members_for_shift_generation(year: int, month: int) -> List[Member]:
+    """シフト生成専用の読み取り専用helper。get_members_as_models()とは独立
+    しており、compute_auto_targets()やその他の既存機能には一切影響しない。
+
+    target_count には(get_members_as_models()の「今月の自動計算目標」ではなく)
+    final target(3月末までの最終目標)をそのまま設定する。final_targetが
+    未設定のメンバーは、既存のtarget_count(手動値、無ければ0)にフォールバック
+    する(final target未設定でもシフト生成自体は壊れないようにするため)。
+    """
+    final_target = get_final_target()
+    return [
+        Member(
+            name=m["name"],
+            target_count=int(final_target.get(m["name"], m.get("target_count", 0))),
+            gaikobu_eligible=bool(m.get("gaikobu_eligible", False)),
+        )
+        for m in get_members()
+    ]

@@ -157,6 +157,35 @@ if members:
 else:
     st.info("メンバーがまだ登録されていません。下のフォームから追加してください。")
 
+st.divider()
+
+# ======================================================================
+# 2.5 月次生成フロー: final target・月別目標(読み取り専用表示)
+# ======================================================================
+st.header("2.5 final target・月別目標(月次生成フロー)")
+st.caption(
+    "3月末までのfinal targetと、月別目標(いずれも別途設定済みの値)を確認できます。"
+    "ここでは表示のみで、値の編集はこの画面では行いません。"
+    "「勤務表を作成する」実行時は、月別目標を最優先のsoft targetとして、"
+    "final targetをhard constraint(残り必要回数の先読み)として使用します。"
+)
+_final_target = ds.get_final_target()
+_month_target_now = ds.get_month_target(config["year"], config["month"])
+if _final_target:
+    _ft_rows = [
+        {
+            "名前": name,
+            "final target(3月末まで)": _final_target.get(name, 0),
+            f"{config['year']}年{config['month']}月の月別目標": _month_target_now.get(name, 0),
+        }
+        for name in _final_target
+    ]
+    st.dataframe(pd.DataFrame(_ft_rows), use_container_width=True, hide_index=True)
+else:
+    st.info("final targetが未設定です(このセクションは今回の月次生成フロー専用で、未設定でも通常の目標回数(自動計算)でシフト生成は動作します)。")
+
+st.divider()
+
 st.subheader("メンバーの追加")
 with st.form("add_member_form", clear_on_submit=True):
     new_name = st.text_input("名前")
@@ -964,18 +993,29 @@ else:
         + " / ".join(f"{m['name']}: {submission_stats.get(m['name'], 0)}日入力済み" for m in members)
     )
 
-    max_time = st.slider("最適化の計算時間(秒)", min_value=5, max_value=120, value=30, step=5)
+    max_time = st.slider("最適化の計算時間(秒)", min_value=5, max_value=180, value=150, step=5)
 
     if st.button("🚀 勤務表を作成する(下書き)", type="primary"):
         with st.spinner("最適化を実行中です..."):
-            member_models = ds.get_members_as_models()
-            unavailabilities = ds.get_unavailability_objects(year, month)
+            # シフト生成専用の読み取り専用helper。get_members_as_models()/
+            # compute_auto_targets()は変更せず、他の既存機能への影響はない。
+            member_models = ds.get_members_for_shift_generation(year, month)
+            unavailabilities = ds.get_unavailability_objects_with_known_absence(year, month)
             gaikobu_days_set = ds.get_gaikobu_days_as_dates(year, month)
             annual_actual_totals = ds.get_annual_actual_own_totals(year)
+
+            member_names = [m.name for m in member_models]
+            month_target = ds.get_month_target(year, month)
+            remaining_target = ds.get_remaining_target(year, month)
+            future_available_slots = ds.get_future_available_slots(year, month, member_names)
+
             options = OptimizerOptions(
                 max_time_seconds=float(max_time),
                 gaikobu_days=gaikobu_days_set,
                 annual_actual_totals=annual_actual_totals,
+                month_target=month_target,
+                remaining_target=remaining_target,
+                future_available_slots=future_available_slots,
             )
             optimizer = OnCallOptimizer(
                 year=year, month=month, members=member_models, unavailabilities=unavailabilities, options=options,
