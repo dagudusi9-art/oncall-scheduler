@@ -34,6 +34,12 @@ import notify  # noqa: E402
 import pdf_export  # noqa: E402
 import sheets_sync as ssync  # noqa: E402
 import ui_common as uc  # noqa: E402
+from seed_monthly_targets import (  # noqa: E402
+    FINAL_TARGET as _SEED_FINAL_TARGET,
+    KNOWN_LONG_TERM_ABSENCE as _SEED_KNOWN_LONG_TERM_ABSENCE,
+    MONTH_TARGETS as _SEED_MONTH_TARGETS,
+    MONTH_TO_YEAR as _SEED_MONTH_TO_YEAR,
+)
 from src.excel_export import export_to_excel  # noqa: E402
 from src.optimizer import OnCallOptimizer, OptimizerOptions  # noqa: E402
 from src.models import ScheduleEntry, ScheduleResult, Slot  # noqa: E402
@@ -183,6 +189,17 @@ if _final_target:
     st.dataframe(pd.DataFrame(_ft_rows), use_container_width=True, hide_index=True)
 else:
     st.info("final targetが未設定です(このセクションは今回の月次生成フロー専用で、未設定でも通常の目標回数(自動計算)でシフト生成は動作します)。")
+    if st.button("月次目標を初期設定する", type="primary", key="seed_monthly_targets_once"):
+        try:
+            ds.set_final_target(_SEED_FINAL_TARGET)
+            for _month_num, _targets in _SEED_MONTH_TARGETS.items():
+                _year = _SEED_MONTH_TO_YEAR[_month_num]
+                ds.set_month_target(_year, _month_num, _targets)
+            ds.set_known_long_term_absence(_SEED_KNOWN_LONG_TERM_ABSENCE)
+            st.success("final target・2026年10月〜2027年3月の月別目標・既知の長期不在を初期設定しました。")
+            st.rerun()
+        except Exception as e:
+            st.error(f"月次目標の初期設定に失敗しました: {e}")
 
 st.divider()
 
