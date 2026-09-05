@@ -139,6 +139,10 @@ class OptimizerOptions:
     total_dev_time_seconds: Optional[float] = None
     fairness_time_seconds: Optional[float] = None
 
+    # 通常solveがINFEASIBLEだった場合の部分勤務表フォールバック専用。
+    # Trueのときだけ自院Day/Night枠に「未割当」を許可し、その数を最優先で最小化する。
+    allow_unassigned: bool = False
+
     def __post_init__(self):
         if self.weights is None:
             self.weights = OptimizerWeights()
@@ -225,6 +229,7 @@ class OnCallOptimizer:
         self.fairness_terms: List[cp_model.LinearExpr] = []
         self.deviation_vars: Dict[str, cp_model.IntVar] = {}  # |actual - month_target| (メンバーごと)
         self.max_dev_var: Optional[cp_model.IntVar] = None  # 上記の最大値
+        self.unassigned_vars: Dict[Tuple[date, Slot], cp_model.IntVar] = {}
         self.warnings: List[str] = []
 
     @staticmethod
@@ -281,11 +286,17 @@ class OnCallOptimizer:
                         model.Add(self.x[(d, slot, name)] == 0)
 
         # --- 絶対条件② 各枠は1人のみ ---
+        # 通常は必ず実在メンバー1人。部分勤務表フォールバック時だけ
+        # 「未割当」変数を1つ追加し、どうしても埋められない枠を空欄で返せるようにする。
         for d in self.days:
             for slot in (Slot.DAY, Slot.NIGHT):
-                model.Add(
-                    sum(self.x[(d, slot, name)] for name in self.member_names) == 1
-                )
+                assigned = sum(self.x[(d, slot, name)] for name in self.member_names)
+                if self.options.allow_unassigned:
+                    u = model.NewBoolVar(f"unassigned_{d.isoformat()}_{slot.value}")
+                    self.unassigned_vars[(d, slot)] = u
+                    model.Add(assigned + u == 1)
+                else:
+                    model.Add(assigned == 1)
 
         # --- 絶対条件③ 同日の日中・夜間を同じ人が担当しない ---
         for d in self.days:
@@ -335,7 +346,11 @@ class OnCallOptimizer:
             R = self.remaining_target[name]
             F = self.future_available_slots[name]
             model.Add(total <= R)
-            model.Add(R - total <= F)
+            # 部分勤務表は未割当枠を人間が後から調整するための「下書き」。
+            # その時点では未割当分の担当者が未確定なので、将来達成可能性の下限だけは
+            # 一時的に適用しない。final targetそのものや上限は変更しない。
+            if not self.options.allow_unassigned:
+                model.Add(R - total <= F)
 
         # --- 「その日に(日中/夜間どちらかで)割り当てられているか」を表すBool変数 ---
         # (同日の日中・夜間は排他なので0/1で表現できる。休息ルールとソフトEの両方で使う)
@@ -681,7 +696,7 @@ class OnCallOptimizer:
 
         # --- 事前診断: 構造的に確実なINFEASIBLEは、solverを回すまでもなく
         #     理由を明示して返す(final targetは変更しない) ---
-        pre_reasons = self._diagnose_infeasibility_precheck()
+        pre_reasons = [] if self.options.allow_unassigned else self._diagnose_infeasibility_precheck()
         if pre_reasons:
             return self._infeasible_result(
                 "最適化に失敗しました(INFEASIBLE)。final targetは変更していません。", pre_reasons
@@ -690,6 +705,23 @@ class OnCallOptimizer:
         all_violations = self._all_violation_vars()
         dev_vars = list(self.deviation_vars.values())
         x_vars = list(self.x.values())
+
+        # 部分勤務表フォールバックでは、何より先に未割当枠数を最小化する。
+        # 最小値を固定してから通常の月別目標・休息・公平性最適化へ進む。
+        if self.options.allow_unassigned and self.unassigned_vars:
+            self.model.Minimize(sum(self.unassigned_vars.values()))
+            solver0 = cp_model.CpSolver()
+            solver0.parameters.max_time_in_seconds = self.options.max_dev_time_seconds
+            solver0.parameters.num_search_workers = 8
+            status0 = solver0.Solve(self.model)
+            if status0 not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+                return self._infeasible_result(
+                    "部分勤務表も作成できませんでした(INFEASIBLE)。",
+                    self._diagnose_infeasibility(),
+                )
+            min_unassigned = sum(solver0.Value(v) for v in self.unassigned_vars.values())
+            self.model.Add(sum(self.unassigned_vars.values()) <= min_unassigned)
+            self._add_solution_hint(self.model, solver0, x_vars)
 
         # ================================================================
         # 第1段階: 月別目標からの「最大ズレ」を最小化
@@ -842,6 +874,20 @@ class OnCallOptimizer:
             stats[name]["weekday_night_violation"] = weekday_night
             stats[name]["sunday_night_monday_violation"] = sunday_monday
             stats[name]["consecutive_rule_violation"] = consecutive
+
+        if self.options.allow_unassigned:
+            missing = [
+                (d, slot) for (d, slot), v in self.unassigned_vars.items()
+                if solver.Value(v) == 1
+            ]
+            if missing:
+                self.warnings.insert(0,
+                    f"勤務可能者不足のため {len(missing)} 枠を未割当のまま作成しました。メンバー間で調整してください。"
+                )
+                for d, slot in missing:
+                    self.warnings.append(
+                        f"{d.isoformat()} {slot.label_ja}: 未割当（勤務可能者不足・要調整）"
+                    )
 
         return ScheduleResult(
             year=self.year, month=self.month, entries=entries, status=status_name,

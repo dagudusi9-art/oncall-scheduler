@@ -1038,6 +1038,30 @@ else:
                 year=year, month=month, members=member_models, unavailabilities=unavailabilities, options=options,
             )
             result = optimizer.solve()
+
+            # 完全な勤務表が物理的に作れない場合だけ、未割当枠を最小限許した
+            # 部分勤務表を作る。不都合日・同日Day/Night兼務禁止などは維持する。
+            if result.status not in ("OPTIMAL", "FEASIBLE"):
+                partial_options = OptimizerOptions(
+                    max_time_seconds=float(max_time),
+                    gaikobu_days=gaikobu_days_set,
+                    annual_actual_totals=annual_actual_totals,
+                    month_target=month_target,
+                    remaining_target=remaining_target,
+                    future_available_slots=future_available_slots,
+                    allow_unassigned=True,
+                )
+                partial_optimizer = OnCallOptimizer(
+                    year=year, month=month, members=member_models,
+                    unavailabilities=unavailabilities, options=partial_options,
+                )
+                partial_result = partial_optimizer.solve()
+                if partial_result.status in ("OPTIMAL", "FEASIBLE"):
+                    partial_result.warnings.insert(0,
+                        "完全な勤務表を作成できなかったため、埋められない枠だけ未割当とした下書きを作成しました。"
+                    )
+                    result = partial_result
+
             st.session_state["schedule_result"] = result
             if result.status in ("OPTIMAL", "FEASIBLE"):
                 ds.save_schedule_snapshot(year, month, _result_to_snapshot(result))
@@ -1105,6 +1129,11 @@ else:
             if st.button("✅ この勤務表を確定する", type="primary"):
                 if effective_result is None:
                     st.error("下書きの再作成が必要です。「勤務表を作成する」を押してください。")
+                elif any(
+                    e.assignments.get(Slot.DAY) is None or e.assignments.get(Slot.NIGHT) is None
+                    for e in effective_result.entries
+                ):
+                    st.error("未割当のDay/Night枠が残っています。予定勤務表の修正で担当者を決めてから確定してください。")
                 else:
                     ds.save_schedule_snapshot(year, month, _result_to_snapshot(effective_result))
                     ds.mark_finalized(year, month)  # ここで実績(actual_assignments)が予定からコピーされる
