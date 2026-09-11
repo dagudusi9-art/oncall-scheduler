@@ -30,6 +30,7 @@ for p in reversed((_APP_DIR, _PROJECT_ROOT)):
 
 import auth  # noqa: E402
 import data_store as ds  # noqa: E402
+import delegated_admin_store as das  # noqa: E402
 import notify  # noqa: E402
 import pdf_export  # noqa: E402
 import sheets_sync as ssync  # noqa: E402
@@ -400,6 +401,94 @@ if members:
 st.divider()
 
 # ======================================================================
+# 4.5 月限定代理管理者
+# ======================================================================
+st.header("4.5 月限定代理管理者")
+st.caption(
+    "特定の年月だけに限定した代理管理者用のURLを発行できます。"
+    "代理管理者は、対象月の入力状況確認・勤務表生成・確定・Excel/PDF出力のみを行えます"
+    "(メンバー管理・目標回数の変更・token発行・外部バイト設定・実績編集などは一切行えません)。"
+    "トークンは長く推測困難なランダム値で、保存されるのはハッシュのみです。"
+    "発行直後にこの画面へ表示されるURLは、その場でコピーして送付してください"
+    "(同じ内容は二度と表示できません)。"
+)
+
+with st.form("issue_delegated_admin_token_form", clear_on_submit=True):
+    dcol1, dcol2, dcol3 = st.columns([1, 1, 2])
+    with dcol1:
+        delegated_year = st.number_input("年", min_value=2020, max_value=2100, value=config["year"], step=1, key="delegated_issue_year")
+    with dcol2:
+        delegated_month = st.number_input("月", min_value=1, max_value=12, value=config["month"], step=1, key="delegated_issue_month")
+    with dcol3:
+        delegated_label = st.text_input("担当者名/label", placeholder="例: Nakajima")
+    issue_submitted = st.form_submit_button("代理管理者トークンを発行")
+    if issue_submitted:
+        if not delegated_label.strip():
+            st.error("担当者名/labelを入力してください")
+        else:
+            raw_token = das.issue_token(int(delegated_year), int(delegated_month), delegated_label.strip())
+            st.session_state["_delegated_admin_new_token"] = {
+                "raw_token": raw_token,
+                "year": int(delegated_year),
+                "month": int(delegated_month),
+                "label": delegated_label.strip(),
+            }
+            st.rerun()
+
+_new_token = st.session_state.pop("_delegated_admin_new_token", None)
+if _new_token:
+    delegated_url = f"{auth.get_app_base_url()}/delegated_admin?dtoken={_new_token['raw_token']}"
+    st.success(
+        f"{_new_token['year']}年{_new_token['month']}月 / {_new_token['label']} 用のトークンを発行しました。"
+        "下記URLを今すぐコピーしてください(このraw値は二度と表示されません)。"
+    )
+    st.code(delegated_url, language=None)
+
+st.subheader("発行中の代理管理者トークン一覧")
+_delegated_tokens = das.list_tokens()
+if not _delegated_tokens:
+    st.caption("発行済みのトークンはまだありません。")
+else:
+    for _t in _delegated_tokens:
+        _revoked = str(_t.get("revoked", "False")).strip().lower() in ("true", "1")
+        tcol1, tcol2, tcol3, tcol4 = st.columns([2, 2, 2, 2])
+        with tcol1:
+            st.write(f"**{_t.get('year')}年{_t.get('month')}月**")
+        with tcol2:
+            st.write(_t.get("label", ""))
+        with tcol3:
+            issued_at_raw = _t.get("issued_at", "")
+            st.write("失効済み" if _revoked else f"発行日時: {_format_sync_time(issued_at_raw) if issued_at_raw else '-'}")
+        with tcol4:
+            if not _revoked:
+                if st.button("revoke", key=f"revoke_delegated_{_t.get('token_hash')}"):
+                    das.revoke_token(_t.get("token_hash", ""))
+                    st.rerun()
+            else:
+                st.write("—")
+
+with st.expander("📜 代理管理者 操作ログ"):
+    _audit_rows = das.get_audit_log()
+    if not _audit_rows:
+        st.caption("記録された操作はまだありません。")
+    else:
+        _audit_df = pd.DataFrame(
+            [
+                {
+                    "日時": _format_sync_time(r.get("timestamp", "")),
+                    "対象年月": f"{r.get('year')}年{r.get('month')}月",
+                    "label": r.get("label", ""),
+                    "action": r.get("action", ""),
+                    "詳細": r.get("detail_json", ""),
+                }
+                for r in _audit_rows
+            ]
+        )
+        st.dataframe(_audit_df, use_container_width=True, hide_index=True)
+
+st.divider()
+
+# ======================================================================
 # 4. 入力締切・リマインダー
 # ======================================================================
 st.header("5. 入力締切・リマインダー")
@@ -655,113 +744,8 @@ year, month = config["year"], config["month"]
 finalized_info = ds.get_finalized_info(year, month)
 
 
-def _render_schedule_calendar(entries: list, year: int, month: int) -> None:
-    """entries: [{"date": "YYYY-MM-DD", "day": 名前 or None, "night": 名前 or None, "gaikobu": 名前 or None}, ...]"""
-    by_day = {e["date"]: e for e in entries}
-    weeks = uc.month_weeks(year, month)
-
-    header_cols = st.columns(7)
-    for col, wd in zip(header_cols, uc.WEEKDAY_JA):
-        col.markdown(f"<div style='text-align:center;font-weight:bold'>{wd}</div>", unsafe_allow_html=True)
-
-    for week in weeks:
-        row_cols = st.columns(7)
-        for col, d in zip(row_cols, week):
-            with col:
-                if d is None:
-                    st.write("")
-                    continue
-                e = by_day.get(d.isoformat(), {})
-                day_name = e.get("day") or "-"
-                night_name = e.get("night") or "-"
-                gaikobu_name = e.get("gaikobu")
-                day_color = uc.member_color(day_name) if day_name != "-" else "#EEEEEE"
-                night_color = uc.member_color(night_name) if night_name != "-" else "#EEEEEE"
-                weekend_marker = " (土日)" if uc.is_weekend(d) else ""
-                gaikobu_html = ""
-                if gaikobu_name:
-                    gaikobu_color = uc.member_color(gaikobu_name)
-                    gaikobu_html = (
-                        f"<div style='background-color:{gaikobu_color};border-radius:4px;padding:2px;"
-                        f"font-size:0.8em;text-align:center'>🚑{gaikobu_name}</div>"
-                    )
-                st.markdown(
-                    f"""
-                    <div style='border:1px solid #ddd;border-radius:6px;padding:4px;margin-bottom:4px;'>
-                      <div style='font-size:0.75em;color:#555'>{d.day}{weekend_marker}</div>
-                      <div style='background-color:{day_color};border-radius:4px;padding:2px;margin:2px 0;font-size:0.8em;text-align:center'>☀️{day_name}</div>
-                      <div style='background-color:{night_color};border-radius:4px;padding:2px;font-size:0.8em;text-align:center'>🌙{night_name}</div>
-                      {gaikobu_html}
-                    </div>
-                    """,
-                    unsafe_allow_html=True,
-                )
-
-
-def _render_stats_table(stats: dict) -> None:
-    stats_rows = [
-        {
-            "名前": name,
-            "日中": s["day"],
-            "夜間": s["night"],
-            "自院合計": s["total"],
-            "外部バイト": s.get("gaikobu", 0),
-            "総勤務": s.get("grand_total", s["total"]),
-            "目標": s["target"],
-            "差": s["diff"],
-        }
-        for name, s in stats.items()
-    ]
-    stats_df = pd.DataFrame(stats_rows)
-
-    def _highlight_diff(val):
-        return "background-color:#F8CCCC" if val != 0 else ""
-
-    st.dataframe(
-        stats_df.style.map(_highlight_diff, subset=["差"]),
-        use_container_width=True,
-        hide_index=True,
-    )
-
-
-def _result_to_snapshot(result: ScheduleResult) -> dict:
-    return {
-        "year": result.year,
-        "month": result.month,
-        "status": result.status,
-        "warnings": result.warnings,
-        "entries": [
-            {
-                "date": e.day.isoformat(),
-                "day": e.assignments.get(Slot.DAY),
-                "night": e.assignments.get(Slot.NIGHT),
-                "gaikobu": e.gaikobu,
-            }
-            for e in result.entries
-        ],
-        "stats": result.stats,
-    }
-
-
-def _snapshot_to_result(snapshot: dict) -> ScheduleResult:
-    """保存済みのスナップショット(JSON)からScheduleResultを再構築する。
-    セッションが切れていて session_state に元のオブジェクトが無い場合でも、
-    確定・Excel/PDF出力ができるようにするための変換。"""
-    entries = []
-    for e in snapshot["entries"]:
-        entry = ScheduleEntry(day=datetime.strptime(e["date"], "%Y-%m-%d").date())
-        entry.assignments[Slot.DAY] = e.get("day")
-        entry.assignments[Slot.NIGHT] = e.get("night")
-        entry.gaikobu = e.get("gaikobu")
-        entries.append(entry)
-    return ScheduleResult(
-        year=snapshot["year"],
-        month=snapshot["month"],
-        entries=entries,
-        status=snapshot["status"],
-        stats=snapshot["stats"],
-        warnings=snapshot.get("warnings", []),
-    )
+# 勤務表カレンダー描画・集計表描画・ScheduleResult<->snapshot変換は
+# ui_common.py へ移設し、delegated_admin.py と共有している(ロジック変更なし)。
 
 
 def _render_schedule_editor_section(year: int, month: int, section_key: str) -> None:
@@ -949,9 +933,9 @@ if finalized_info:
     snapshot = ds.load_schedule_snapshot(year, month)
     if snapshot:
         st.subheader("📅 予定勤務表(カレンダー表示)")
-        _render_schedule_calendar(snapshot["entries"], year, month)
+        uc.render_schedule_calendar(snapshot["entries"], year, month)
         st.subheader("📊 月間集計(予定ベース)")
-        _render_stats_table(snapshot["stats"])
+        uc.render_stats_table(snapshot["stats"])
         _render_schedule_editor_section(year, month, "finalized")
 
     excel_path = _PROJECT_ROOT / "output" / f"schedule_{year}_{month:02d}.xlsx"
@@ -960,7 +944,7 @@ if finalized_info:
     if st.button("🔄 実績・年間集計・交代履歴の最新状態でExcel/PDFを再生成"):
         if snapshot is not None:
             actual_entries, actual_stats, annual_totals, swap_history = _get_export_extras(year, month)
-            scheduled_for_export = _snapshot_to_result(snapshot)
+            scheduled_for_export = uc.snapshot_to_result(snapshot)
             export_to_excel(
                 scheduled_for_export, excel_path,
                 actual_entries=actual_entries, actual_stats=actual_stats,
@@ -1064,7 +1048,7 @@ else:
 
             st.session_state["schedule_result"] = result
             if result.status in ("OPTIMAL", "FEASIBLE"):
-                ds.save_schedule_snapshot(year, month, _result_to_snapshot(result))
+                ds.save_schedule_snapshot(year, month, uc.result_to_snapshot(result))
 
     result = st.session_state.get("schedule_result")
     snapshot = ds.load_schedule_snapshot(year, month) if result is None else None
@@ -1074,14 +1058,14 @@ else:
     if result is not None:
         effective_result = result
     elif snapshot is not None and snapshot["status"] in ("OPTIMAL", "FEASIBLE"):
-        effective_result = _snapshot_to_result(snapshot)
+        effective_result = uc.snapshot_to_result(snapshot)
 
     display_entries, display_stats, display_status, display_warnings = None, None, None, []
     if result is not None:
         display_status = result.status
         display_warnings = result.warnings
         if result.status in ("OPTIMAL", "FEASIBLE"):
-            snap = _result_to_snapshot(result)
+            snap = uc.result_to_snapshot(result)
             display_entries, display_stats = snap["entries"], snap["stats"]
     elif snapshot is not None:
         display_status = snapshot["status"]
@@ -1101,10 +1085,10 @@ else:
                         st.write(f"- {w}")
 
             st.subheader("📅 勤務表(カレンダー表示・下書き)")
-            _render_schedule_calendar(display_entries, year, month)
+            uc.render_schedule_calendar(display_entries, year, month)
 
             st.subheader("📊 集計表")
-            _render_stats_table(display_stats)
+            uc.render_stats_table(display_stats)
             _render_schedule_editor_section(year, month, "draft")
 
             st.subheader("⬇️ Excel出力(下書き)")
@@ -1135,7 +1119,7 @@ else:
                 ):
                     st.error("未割当のDay/Night枠が残っています。予定勤務表の修正で担当者を決めてから確定してください。")
                 else:
-                    ds.save_schedule_snapshot(year, month, _result_to_snapshot(effective_result))
+                    ds.save_schedule_snapshot(year, month, uc.result_to_snapshot(effective_result))
                     ds.mark_finalized(year, month)  # ここで実績(actual_assignments)が予定からコピーされる
 
                     excel_path = _PROJECT_ROOT / "output" / f"schedule_{year}_{month:02d}.xlsx"
@@ -1206,9 +1190,9 @@ else:
         "独立して更新されます。年間集計・翌月以降の均等化には必ずこの実績が使われます。"
     )
     st.subheader("📅 実績勤務表(カレンダー表示)")
-    _render_schedule_calendar(actual_snapshot["entries"], year, month)
+    uc.render_schedule_calendar(actual_snapshot["entries"], year, month)
     st.subheader("📊 月間集計(実績ベース)")
-    _render_stats_table(actual_snapshot["stats"])
+    uc.render_stats_table(actual_snapshot["stats"])
 
     _render_actual_editor_table(year, month)
 

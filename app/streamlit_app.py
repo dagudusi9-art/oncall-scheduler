@@ -185,6 +185,18 @@ def home() -> None:
 home_page = st.Page(home, title="ホーム", icon="🏥", default=True, url_path="home")
 member_page = st.Page(str(PAGES_DIR / "member_input.py"), title="メンバー入力", icon="👤", url_path="member_input")
 admin_page = st.Page(str(PAGES_DIR / "admin.py"), title="管理者", icon="🛠️", url_path="admin")
+delegated_admin_page = st.Page(
+    str(PAGES_DIR / "delegated_admin.py"), title="月限定代理管理者", icon="🗓️", url_path="delegated_admin"
+)
 
-pg = st.navigation([home_page, member_page, admin_page])
+pages = [home_page, member_page, admin_page]
+# 月限定代理管理者ページは、専用URL(?dtoken=...)でアクセスされた場合のみ
+# ナビゲーションに含める。URLを知らない通常のアクセスではサイドバーにも
+# 一切表示されない(存在自体が分からない)。ページ内部でも改めて
+# トークンの有効性・対象年月を検証しており、これは利便性のための
+# 追加対応であって、セキュリティ境界そのものはページ内部の検証に依る。
+if st.query_params.get("dtoken"):
+    pages.append(delegated_admin_page)
+
+pg = st.navigation(pages)
 pg.run()

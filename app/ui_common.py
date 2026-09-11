@@ -8,8 +8,19 @@ from __future__ import annotations
 
 import calendar
 import hashlib
-from datetime import date
+import sys
+from datetime import date, datetime
+from pathlib import Path
 from typing import List, Optional
+
+import streamlit as st
+
+_APP_DIR = Path(__file__).resolve().parent
+_PROJECT_ROOT = _APP_DIR.parent
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.append(str(_PROJECT_ROOT))
+
+from src.models import ScheduleEntry, ScheduleResult, Slot  # noqa: E402
 
 # カレンダーグリッドのヘッダー表示用(日曜始まり)。
 # WEEKDAY_JA[0]が週の最初の列(日曜)に対応する。
@@ -65,3 +76,124 @@ def member_color(name: str) -> str:
 
 def is_weekend(d: date) -> bool:
     return d.weekday() >= 5
+
+
+# ----------------------------------------------------------------------
+# 勤務表カレンダー・集計表の描画、ScheduleResult<->snapshot(dict)変換
+#
+# 元は app/pages/admin.py にのみ定義されていたが、限定管理者ページ
+# (app/pages/delegated_admin.py)からも同一ロジックで再利用するため
+# ここへ移設した(ロジック自体の変更は一切ない。呼び出し側は
+# `uc.render_schedule_calendar(...)` 等に置き換えるだけで、挙動は
+# 移設前と完全に同一)。
+# ----------------------------------------------------------------------
+
+def render_schedule_calendar(entries: list, year: int, month: int) -> None:
+    """entries: [{"date": "YYYY-MM-DD", "day": 名前 or None, "night": 名前 or None, "gaikobu": 名前 or None}, ...]"""
+    by_day = {e["date"]: e for e in entries}
+    weeks = month_weeks(year, month)
+
+    header_cols = st.columns(7)
+    for col, wd in zip(header_cols, WEEKDAY_JA):
+        col.markdown(f"<div style='text-align:center;font-weight:bold'>{wd}</div>", unsafe_allow_html=True)
+
+    for week in weeks:
+        row_cols = st.columns(7)
+        for col, d in zip(row_cols, week):
+            with col:
+                if d is None:
+                    st.write("")
+                    continue
+                e = by_day.get(d.isoformat(), {})
+                day_name = e.get("day") or "-"
+                night_name = e.get("night") or "-"
+                gaikobu_name = e.get("gaikobu")
+                day_color = member_color(day_name) if day_name != "-" else "#EEEEEE"
+                night_color = member_color(night_name) if night_name != "-" else "#EEEEEE"
+                weekend_marker = " (土日)" if is_weekend(d) else ""
+                gaikobu_html = ""
+                if gaikobu_name:
+                    gaikobu_color = member_color(gaikobu_name)
+                    gaikobu_html = (
+                        f"<div style='background-color:{gaikobu_color};border-radius:4px;padding:2px;"
+                        f"font-size:0.8em;text-align:center'>🚑{gaikobu_name}</div>"
+                    )
+                st.markdown(
+                    f"""
+                    <div style='border:1px solid #ddd;border-radius:6px;padding:4px;margin-bottom:4px;'>
+                      <div style='font-size:0.75em;color:#555'>{d.day}{weekend_marker}</div>
+                      <div style='background-color:{day_color};border-radius:4px;padding:2px;margin:2px 0;font-size:0.8em;text-align:center'>☀️{day_name}</div>
+                      <div style='background-color:{night_color};border-radius:4px;padding:2px;font-size:0.8em;text-align:center'>🌙{night_name}</div>
+                      {gaikobu_html}
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+
+
+def render_stats_table(stats: dict) -> None:
+    import pandas as pd
+
+    stats_rows = [
+        {
+            "名前": name,
+            "日中": s["day"],
+            "夜間": s["night"],
+            "自院合計": s["total"],
+            "外部バイト": s.get("gaikobu", 0),
+            "総勤務": s.get("grand_total", s["total"]),
+            "目標": s["target"],
+            "差": s["diff"],
+        }
+        for name, s in stats.items()
+    ]
+    stats_df = pd.DataFrame(stats_rows)
+
+    def _highlight_diff(val):
+        return "background-color:#F8CCCC" if val != 0 else ""
+
+    st.dataframe(
+        stats_df.style.map(_highlight_diff, subset=["差"]),
+        use_container_width=True,
+        hide_index=True,
+    )
+
+
+def result_to_snapshot(result: ScheduleResult) -> dict:
+    return {
+        "year": result.year,
+        "month": result.month,
+        "status": result.status,
+        "warnings": result.warnings,
+        "entries": [
+            {
+                "date": e.day.isoformat(),
+                "day": e.assignments.get(Slot.DAY),
+                "night": e.assignments.get(Slot.NIGHT),
+                "gaikobu": e.gaikobu,
+            }
+            for e in result.entries
+        ],
+        "stats": result.stats,
+    }
+
+
+def snapshot_to_result(snapshot: dict) -> ScheduleResult:
+    """保存済みのスナップショット(JSON)からScheduleResultを再構築する。
+    セッションが切れていて session_state に元のオブジェクトが無い場合でも、
+    確定・Excel/PDF出力ができるようにするための変換。"""
+    entries = []
+    for e in snapshot["entries"]:
+        entry = ScheduleEntry(day=datetime.strptime(e["date"], "%Y-%m-%d").date())
+        entry.assignments[Slot.DAY] = e.get("day")
+        entry.assignments[Slot.NIGHT] = e.get("night")
+        entry.gaikobu = e.get("gaikobu")
+        entries.append(entry)
+    return ScheduleResult(
+        year=snapshot["year"],
+        month=snapshot["month"],
+        entries=entries,
+        status=snapshot["status"],
+        stats=snapshot["stats"],
+        warnings=snapshot.get("warnings", []),
+    )
