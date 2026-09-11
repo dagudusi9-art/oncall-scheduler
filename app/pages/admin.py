@@ -476,7 +476,7 @@ with st.expander("📜 代理管理者 操作ログ"):
             [
                 {
                     "日時": _format_sync_time(r.get("timestamp", "")),
-                    "対象年月": f"{r.get('year')}年{r.get('month')}月",
+                    "対象年月": f"{r.get('year', '')}年{r.get('month', '')}月",
                     "label": r.get("label", ""),
                     "action": r.get("action", ""),
                     "詳細": r.get("detail_json", ""),

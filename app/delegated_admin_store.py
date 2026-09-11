@@ -178,6 +178,55 @@ def validate_token(raw_token: str) -> Optional[dict]:
 # audit log(append-only)
 # ----------------------------------------------------------------------
 
+def _ensure_audit_log_header_once() -> None:
+    """delegated_admin_audit_log シートに対して、まだ1件もデータが
+    無いことを確認できた場合に限り、ヘッダー行だけを単独で先に確定させる。
+
+    背景(原因調査): sheets_backend.append_row_safe() は「シートが
+    空ならヘッダー行を追記し、続けてその場でデータ行を追記する」実装に
+    なっている。真っさらなシートに対してこの2回の ws.append_row() が
+    間隔なく連続実行されると、Google Sheets API側の反映タイミングに
+    よっては2回目の追記(データ行)が1回目のヘッダー行を上書きして
+    しまうことがある(append_row()を間隔を空けずに連続実行した際に
+    知られている事象)。
+
+    実際に本番で発生した不具合はこれが原因だった: 最初の login 用の
+    append_row_safe() 呼び出しで、ヘッダー行がデータ行の値で上書き
+    されてしまい、以降 sheets_backend.read_table()(内部で
+    ws.get_all_records() を使う)がこの壊れた1行目を「列名」として
+    扱ってしまうため、action/year/month等の列が正しく取得できず、
+    管理者画面の「代理管理者 操作ログ」が空行や `None年None月` に
+    見えていた。
+
+    対策として、ヘッダーが未確定(=シートにまだデータが1件も無い)
+    場合だけ、write_table()で先にヘッダー行のみを単独で書き込んで
+    おく。write_table()はclear()+update()による範囲指定の書き込みで、
+    append_row()のような「末尾行の自動検出」に依存しないため、この後に
+    append_row_safe()を呼んでも(その時点で既にヘッダーが存在するため)
+    append_row_safe()内部の「シートが空なら」の分岐そのものが発生せず、
+    連続appendによる競合が起きない。
+
+    既に1件でもデータが読み取れた場合は絶対に呼び出し元から
+    実行しない(write_table()はシート全体を上書きするため、既存の
+    監査ログを消してしまわないよう、必ず事前にread_table()で
+    空であることを確認してから呼ぶこと)。
+    """
+    existing = sheets_backend.read_table(SHEET_AUDIT_LOG)
+    if existing:
+        return  # 既にデータがある場合は何もしない(既存ログを消さないため)
+    sheets_backend.write_table(SHEET_AUDIT_LOG, AUDIT_HEADER, [])
+
+
+def _looks_like_audit_row(r: dict) -> bool:
+    """audit log の1行として最低限の形を満たしているかを判定する。
+
+    ヘッダー行破損等、何らかの理由で期待した列が読み取れなかった行を
+    「空行」としてそのまま画面に表示してしまわないよう、
+    action・timestampの両方が読み取れる行だけを有効な行とみなす。
+    """
+    return bool(r.get("action")) and bool(r.get("timestamp"))
+
+
 def log_action(token_info: dict, action: str, detail: Optional[dict] = None) -> None:
     """delegated_admin_audit_log へ1行追記する。
     Sheets未設定・書き込み失敗時はローカルJSONへ追記する(いずれの場合も
@@ -194,6 +243,7 @@ def log_action(token_info: dict, action: str, detail: Optional[dict] = None) -> 
 
     ok = False
     if sheets_backend.is_configured():
+        _ensure_audit_log_header_once()
         ok = sheets_backend.append_row_safe(SHEET_AUDIT_LOG, AUDIT_HEADER, row)
 
     if not ok:
@@ -203,12 +253,18 @@ def log_action(token_info: dict, action: str, detail: Optional[dict] = None) -> 
 
 
 def get_audit_log(year: Optional[int] = None, month: Optional[int] = None) -> List[dict]:
-    """通常管理者画面での閲覧用。year/monthでフィルタ可能。新しい順。"""
+    """通常管理者画面での閲覧用。year/monthでフィルタ可能。新しい順。
+
+    action・timestampが読み取れない行(ヘッダー破損等による欠損行)は
+    ここで除外し、画面に空行やNoneを表示させない。
+    """
     rows: Optional[List[dict]] = None
     if sheets_backend.is_configured():
         rows = sheets_backend.read_table(SHEET_AUDIT_LOG)
     if rows is None:
         rows = _read_local_json(AUDIT_LOG_LOCAL_PATH, [])
+
+    rows = [r for r in rows if _looks_like_audit_row(r)]
 
     if year is not None:
         rows = [r for r in rows if str(r.get("year")) == str(int(year))]

@@ -168,6 +168,87 @@ def test_audit_log_records_actions_with_detail():
         shutil.rmtree(tmp_dir)
 
 
+def test_get_audit_log_filters_out_malformed_rows():
+    """ヘッダー崩れ等により action/timestamp が読み取れない行が
+    紛れ込んでいても、一覧には出さず、正常な行だけを返すこと
+    (本番で発生した「空行・None年None月」表示の再発防止)。"""
+    das, tmp_dir = _fresh_store()
+    try:
+        info = das.validate_token(das.issue_token(2026, 11, "Nakajima"))
+        das.log_action(info, "login", {})
+
+        corrupted_rows = json.loads(das.AUDIT_LOG_LOCAL_PATH.read_text(encoding="utf-8"))
+        # ヘッダー破損時に実際に起こりうる「期待した列が無い」壊れた行を模擬する
+        corrupted_rows.append({"2026-09-11T00:00:00": "h1", "Nakajima": "login"})
+        das.AUDIT_LOG_LOCAL_PATH.write_text(json.dumps(corrupted_rows, ensure_ascii=False), encoding="utf-8")
+
+        logs = das.get_audit_log(year=2026, month=11)
+        assert len(logs) == 1
+        assert logs[0]["action"] == "login"
+    finally:
+        shutil.rmtree(tmp_dir)
+
+
+class _FakeSheetsBackend:
+    """append_row_safe()の「シートが空なら直後にヘッダー→データを連続append
+    する」実装が引き起こす競合(本番で発生した不具合の原因)を、
+    delegated_admin_store.py 側の対策(_ensure_audit_log_header_once)が
+    正しく回避しているかを検証するための最小限のスタブ。"""
+
+    def __init__(self):
+        self.storage = []
+        self.calls = []
+
+    def is_configured(self):
+        return True
+
+    def read_table(self, sheet_name):
+        self.calls.append(("read_table", sheet_name))
+        return list(self.storage)
+
+    def write_table(self, sheet_name, header, rows):
+        self.calls.append(("write_table", sheet_name, list(rows)))
+        self.storage = list(rows)
+        return True
+
+    def append_row_safe(self, sheet_name, header, row_dict):
+        self.calls.append(("append_row_safe", sheet_name, dict(row_dict)))
+        self.storage.append(dict(row_dict))
+        return True
+
+
+def test_log_action_pre_writes_header_once_before_first_append():
+    """初回のみ write_table() でヘッダーを単独確定させてから
+    append_row_safe() を呼び、2回目以降は(既存データを消さないため)
+    write_table() を再度呼ばないこと。"""
+    das, tmp_dir = _fresh_store()
+    fake = _FakeSheetsBackend()
+    original_backend = das.sheets_backend
+    das.sheets_backend = fake
+    try:
+        info = {"token_hash": "h1", "year": 2026, "month": 11, "label": "Nakajima"}
+
+        das.log_action(info, "login", {})
+
+        assert ("write_table", das.SHEET_AUDIT_LOG, []) in fake.calls
+        write_idx = fake.calls.index(("write_table", das.SHEET_AUDIT_LOG, []))
+        append_idx = next(i for i, c in enumerate(fake.calls) if c[0] == "append_row_safe")
+        assert write_idx < append_idx, "ヘッダーの単独確定は最初のappendより前に行われる必要がある"
+
+        assert sum(1 for c in fake.calls if c[0] == "write_table") == 1
+
+        das.log_action(info, "generate_draft", {"status": "OPTIMAL"})
+
+        # 既にデータがあるので write_table() は再実行されない
+        # (既存ログを消してしまわないための確認)
+        assert sum(1 for c in fake.calls if c[0] == "write_table") == 1
+        assert len(fake.storage) == 2
+        assert [r["action"] for r in fake.storage] == ["login", "generate_draft"]
+    finally:
+        das.sheets_backend = original_backend
+        shutil.rmtree(tmp_dir)
+
+
 def test_audit_log_filters_by_year_month():
     das, tmp_dir = _fresh_store()
     try:
