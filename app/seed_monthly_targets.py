@@ -1,86 +1,36 @@
 # -*- coding: utf-8 -*-
-"""
-final_target / month_target_* / known_long_term_absence の初期値投入スクリプト。
-
-各値は data_store.py の set_final_target() / set_month_target() /
-set_known_long_term_absence() をそれぞれ個別に呼び出すだけであり、
-app_stateの他のキーには一切触れない(既存のgaikobu_days・finalized・
-schedule等のキーはそのまま残る)。
-
-実行方法:
-    cd oncall_scheduler_git
-    python -m app.seed_monthly_targets   (または直接 python app/seed_monthly_targets.py)
-
-Sheets連携が設定されていればそちらにも反映され、未設定ならローカルの
-data/*.json にのみ保存される(通常のdata_store.pyの挙動と同じ)。
-"""
+"""Target definitions, and safe refresh of Dec 2026–Mar 2027 targets."""
+import calendar
 import sys
 from pathlib import Path
+APP_DIR = Path(__file__).resolve().parent
+if str(APP_DIR) not in sys.path:
+    sys.path.insert(0, str(APP_DIR))
+import data_store as ds
 
-_APP_DIR = Path(__file__).resolve().parent
-_PROJECT_ROOT = _APP_DIR.parent
-for p in (_APP_DIR, _PROJECT_ROOT):
-    if str(p) not in sys.path:
-        sys.path.insert(0, str(p))
-
-import data_store as ds  # noqa: E402
-
-
-FINAL_TARGET = {
-    "Ryu": 25,
-    "Nakajima": 28,
-    "Kikuchi": 37,
-    "Otani": 42,
-    "Fujii": 56,
-    "Kosaka": 53,
-    "Wakayama": 57,
-    "Otaki": 66,
-}
-
-# {month_number: {name: target}}
-MONTH_TARGETS = {
-    10: {"Ryu": 0, "Nakajima": 5, "Kikuchi": 14, "Otani": 6, "Fujii": 0, "Kosaka": 18, "Wakayama": 19, "Otaki": 0},
-    11: {"Ryu": 8, "Nakajima": 0, "Kikuchi": 8, "Otani": 0, "Fujii": 0, "Kosaka": 11, "Wakayama": 13, "Otaki": 20},
-    12: {"Ryu": 8, "Nakajima": 3, "Kikuchi": 5, "Otani": 9, "Fujii": 13, "Kosaka": 7, "Wakayama": 4, "Otaki": 13},
-    1: {"Ryu": 4, "Nakajima": 8, "Kikuchi": 2, "Otani": 9, "Fujii": 15, "Kosaka": 6, "Wakayama": 7, "Otaki": 11},
-    2: {"Ryu": 5, "Nakajima": 7, "Kikuchi": 3, "Otani": 8, "Fujii": 12, "Kosaka": 5, "Wakayama": 6, "Otaki": 10},
-    3: {"Ryu": 0, "Nakajima": 5, "Kikuchi": 5, "Otani": 10, "Fujii": 16, "Kosaka": 6, "Wakayama": 8, "Otaki": 12},
-}
-
-# 2026年10月〜2027年3月の月番号 -> 実際の年
+MONTH_TARGETS_BY_DATE = {(2026, 12): {'Fujii': 13, 'Ryu': 19, 'Nakajima': 6, 'Kosaka': 4, 'Otani': 10, 'Kikuchi': 6, 'Wakayama': 4, 'Otaki': 0}, (2027, 1): {'Fujii': 15, 'Ryu': 8, 'Nakajima': 14, 'Kosaka': 4, 'Otani': 12, 'Kikuchi': 2, 'Wakayama': 7, 'Otaki': 0}, (2027, 2): {'Fujii': 7, 'Ryu': 12, 'Nakajima': 13, 'Kosaka': 4, 'Otani': 10, 'Kikuchi': 4, 'Wakayama': 6, 'Otaki': 0}, (2027, 3): {'Fujii': 22, 'Ryu': 0, 'Nakajima': 8, 'Kosaka': 5, 'Otani': 13, 'Kikuchi': 6, 'Wakayama': 8, 'Otaki': 0}}
 MONTH_TO_YEAR = {10: 2026, 11: 2026, 12: 2026, 1: 2027, 2: 2027, 3: 2027}
+MONTH_TARGETS = {m: targets for (y, m), targets in MONTH_TARGETS_BY_DATE.items()}
+KNOWN_LONG_TERM_ABSENCE = {}  # The previously saved absence data must not be overwritten.
+FINAL_TARGET = {}  # Calculated using confirmed actual Oct–Nov counts when applying.
 
-KNOWN_LONG_TERM_ABSENCE = {
-    "Otaki": [{"start": "2026-10-01", "end": "2026-10-31"}],
-    "Otani": [{"start": "2026-10-13", "end": "2026-12-06"}],
-    "Kikuchi": [{"start": "2027-01-01", "end": "2027-01-15"}],
-    "Kosaka": [],
-    "Nakajima": [
-        {"start": "2026-10-12", "end": "2026-12-20"},
-        {"start": "2027-03-01", "end": "2027-03-14"},
-    ],
-    "Fujii": [{"start": "2026-10-01", "end": "2026-12-06"}],
-    "Ryu": [
-        {"start": "2026-10-01", "end": "2026-11-08"},
-        {"start": "2027-01-18", "end": "2027-01-31"},
-        {"start": "2027-03-01", "end": "2027-03-31"},
-    ],
-    "Wakayama": [{"start": "2026-12-07", "end": "2026-12-21"}],
-}
-
-
-def main() -> None:
-    ds.set_final_target(FINAL_TARGET)
-    print(f"final_target を保存しました: {FINAL_TARGET}")
-
-    for month_num, targets in MONTH_TARGETS.items():
-        year = MONTH_TO_YEAR[month_num]
-        ds.set_month_target(year, month_num, targets)
-        print(f"month_target_{year}_{month_num:02d} を保存しました: {targets}")
-
-    ds.set_known_long_term_absence(KNOWN_LONG_TERM_ABSENCE)
-    print(f"known_long_term_absence を保存しました: {KNOWN_LONG_TERM_ABSENCE}")
-
+def update_future_targets():
+    """Write Dec–Mar goals and final_target; requires confirmed Oct and Nov data."""
+    for (y,m), targets in MONTH_TARGETS_BY_DATE.items():
+        expected = calendar.monthrange(y,m)[1]*2
+        if sum(targets.values()) != expected:
+            raise ValueError(f"{y}/{m}: expected {expected} slots")
+    for y,m in [(2026,10),(2026,11)]:
+        if not ds.is_actual_finalized(y,m) or not ds.load_actual_snapshot(y,m):
+            raise RuntimeError(f"{y}/{m} の確定済み実績が必要です。目標値は変更していません。")
+    names = list(next(iter(MONTH_TARGETS_BY_DATE.values())))
+    previous = ds.get_confirmed_actual_totals(names, 2026, 12)
+    future = {n:sum(v[n] for v in MONTH_TARGETS_BY_DATE.values()) for n in names}
+    final = {n:previous[n]+future[n] for n in names}
+    for (y,m), targets in MONTH_TARGETS_BY_DATE.items():
+        ds.set_month_target(y,m,targets)
+    ds.set_final_target(final)
+    return final
 
 if __name__ == "__main__":
-    main()
+    print(update_future_targets())
