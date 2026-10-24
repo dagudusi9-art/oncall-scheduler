@@ -35,7 +35,7 @@ import notify  # noqa: E402
 import pdf_export  # noqa: E402
 import sheets_sync as ssync  # noqa: E402
 import ui_common as uc  # noqa: E402
-from seed_monthly_targets import update_future_targets  # noqa: E402
+from seed_monthly_targets import (update_future_targets, MONTH_TARGETS_BY_DATE, proposed_final_targets)  # noqa: E402
 from src.excel_export import export_to_excel  # noqa: E402
 from src.optimizer import OnCallOptimizer, OptimizerOptions  # noqa: E402
 from src.models import ScheduleEntry, ScheduleResult, Slot  # noqa: E402
@@ -186,6 +186,28 @@ if _final_target:
 else:
     st.info("final targetが未設定です(このセクションは今回の月次生成フロー専用で、未設定でも通常の目標回数(自動計算)でシフト生成は動作します)。")
     st.info("下の『12月〜3月の目標回数を更新』を使用してください。")
+
+st.subheader("12月〜3月の目標回数を更新")
+st.caption("大滝先生は全月0回、Day・Nightは各1回。2026年10〜11月の画像集計を加えたfinal targetも同時に更新します。ほかの設定・勤務表・休暇には触れません。")
+_preview_rows = []
+for _name in ("Fujii", "Ryu", "Nakajima", "Kosaka", "Atsushi", "Kikuchi", "Wakayama", "Otaki"):
+    _preview_rows.append({
+        "名前":_name,
+        "12月":MONTH_TARGETS_BY_DATE[(2026,12)][_name],
+        "1月":MONTH_TARGETS_BY_DATE[(2027,1)][_name],
+        "2月":MONTH_TARGETS_BY_DATE[(2027,2)][_name],
+        "3月":MONTH_TARGETS_BY_DATE[(2027,3)][_name],
+        "final target（2026年10月〜2027年3月）":proposed_final_targets()[_name],
+    })
+st.dataframe(pd.DataFrame(_preview_rows), hide_index=True, use_container_width=True)
+_confirm_target_update = st.checkbox("表示の月別目標とfinal targetに上書きすることを確認しました", key="confirm_dec_mar_targets")
+if st.button("12月〜3月の目標回数を更新", type="primary", disabled=not _confirm_target_update, key="apply_dec_mar_targets"):
+    try:
+        update_future_targets()
+        st.success("更新しました。月別目標とfinal targetを保存しました。")
+        st.rerun()
+    except Exception as exc:
+        st.error(f"目標回数の更新に失敗しました: {exc}")
 
 st.divider()
 
